@@ -140,6 +140,6 @@ if __name__ == '__main__':
     plt.title('Hydrostatic check after projection (staggered grid)')
     plt.legend(); plt.grid(True); plt.tight_layout(); plt.show()
 
-from plot_utils_rz import plot_pressure_rz
+    from plot_utils_rz import plot_pressure_rz
 
-plot_pressure_rz(p, grid.r_edges, grid.z_edges, title="Pressure (hydrostatic test)")
+    plot_pressure_rz(p, grid.r_edges, grid.z_edges, title="Pressure (hydrostatic test)")
