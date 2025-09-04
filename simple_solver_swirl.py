@@ -437,9 +437,10 @@ def volume_from_pressure_isobar(p, grid, patm=0.0, offset=0.0):
     z_fs = np.zeros(Nr)
     for i in range(Nr):
         col = p[i,:] + offset - patm
-        # default: surface at top if top cell <= 0
-        if col[-1] <= 0:
+        # default: surface at top if top cell >= 0
+        if col[-1] >= 0:
             z_fs[i] = grid.z_edges[-1]
+            # print("   col[-1] = %12.5e"%col[-1],": i = ", i, "z_fs[i]= ",z_fs[i])
             continue
         # find first sign change from top down
         found = False
@@ -454,6 +455,7 @@ def volume_from_pressure_isobar(p, grid, patm=0.0, offset=0.0):
         if not found:
             # whole column positive → surface below bottom (empty column): set to bottom
             z_fs[i] = grid.z_edges[0]
+        # print("   Found=",found, " i = ", i, "z_fs[i]= ",z_fs[i])
     # Axisymmetric volume: 2π ∫ r z(r) dr  ≈ 2π Σ r_c z_fs Δr
     dr = grid.r_edges[1:] - grid.r_edges[:-1]
     return 2*np.pi * np.sum(r_c * z_fs * dr)
@@ -468,9 +470,9 @@ def choose_pressure_offset_for_volume(p, grid, V_target, patm=0.0, c_lo=-1e7, c_
     for _ in range(60):
         c_mid = 0.5*(c_lo + c_hi)
         f_mid = volume_from_pressure_isobar(p, grid, patm, c_mid) - V_target
-        print(f"{_:3d} f_mid = {f_mid:.3e}" )
-        print(" c_mid = ", c_mid)
-        print(" volume_from_pressure_isobar(p,grid,patm,c_mid) = ", volume_from_pressure_isobar(p,grid,patm,c_mid))
+        # print(f"{_:3d} f_mid volume = {f_mid:.3e}" )
+        # print(" c_mid = ", c_mid)
+        # print(" volume_from_pressure_isobar(p,grid,patm,c_mid) = ", volume_from_pressure_isobar(p,grid,patm,c_mid))
         if abs(f_mid) <= max(1.0, abs(V_target))*tol:
             return c_mid
         if f_lo * f_mid <= 0:

@@ -38,7 +38,7 @@ Nr, Nz = 120, 200       # grid resolution (tune as desired)
 Nr, Nz = 30, 50       # grid resolution (tune as desired)
 dt = 0.0004              # s (keep CFL = u*dt/dr <= ~0.5; here u ~ ΩR ≈ 31.4 m/s → dr ≈ R/Nr)
 dt = 0.001 # cheating
-max_iter = 6000          # SIMPLE iterations
+max_iter = 1000          # SIMPLE iterations
 alpha_p = 0.7           # pressure under-relaxation
 tol_div = 1e-8
 
@@ -82,7 +82,7 @@ p += c # now the P=0 contour will contain our mass
 # Plot: pressure colormap
 # -------------------
 plot_pressure_contours(p, grid,
-                       title='Rotating bucket: pressure contours' % (it),
+                       title='Rotating bucket: pressure contours',
                        unit='bar', scale=1e5, n_contours=10)
 
 # -------------------
