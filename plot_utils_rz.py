@@ -61,7 +61,7 @@ def plot_pressure_rz_with_overlays(p, r_edges, z_edges, title=None, unit='Pa', s
     if show_contours:
         # Build mesh of centers for contouring (slightly offset to cell centers)
         R, Z = np.meshgrid(r_c, z_c, indexing='ij')
-        CS = plt.contour(r_c, z_c, (p/scale), levels=n_contours)
+        CS = plt.contour(r_c, z_c, (p/scale).T, levels=n_contours)
         plt.clabel(CS, inline=True, fontsize=8)
 
     # Free-surface overlay
