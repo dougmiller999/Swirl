@@ -347,10 +347,10 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         hist_ut = np.max(np.abs(_update_utheta(u_t, u_r, u_z, grid, nu, 0.0, bc) - u_t))  # zero dt -> just BC reapply
         history.append((it, max_div, res_p, hist_ut))
 
-        if verbose and (it % 20 == 0 or it == 1):
-            print(f"Iter {it:4d}: max(div u)={max_div:.3e}  max|p'-oldP|={res_p:.3e}")
+        if verbose and (it % 200 == 0 or it == 1):
+            print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
 
-        if (it % 1000 == 0 or it == 1):
+        if (it % 20000 == 0 or it == 1):
             # -------------------
             # Plot: pressure colormap + u_theta contours
             # -------------------
@@ -364,10 +364,12 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
             
 
         # if max_div < tol_div and res_p < 1e-8:
-        if max_div < tol_div and res_p < 10:
+        if max_div < tol_div and res_p < 1:
             if verbose:
                 print(f"Converged (continuity & pressure) at iter {it}: max(div u)={max_div:.3e}")
             break
+
+    print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
 
     return {'p': p, 'u_r': u_r, 'u_z': u_z, 'u_t': u_t, 'grid': grid, 'history': history}
 

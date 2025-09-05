@@ -23,13 +23,20 @@ from simple_solver_swirl import plot_pressure_contours, choose_pressure_offset_f
 # -------------------
 # Problem parameters
 # -------------------
+g    = 9.81  # m/s^2
 rho = 1000.0            # kg/m^3
 mu  = 1.0e-3            # Pa·s
 R   = 3.0               # m
 H   = 5.0               # m (mean height)
+
+# this piles up liquid between 2.23 and R in a sharp near-triangle
 rpm = 100.0
 Omega = rpm * 2.0*np.pi / 60.0   # rad/s
-g    = 9.81  # m/s^2
+Zmax = 25.0 # m, range allowed for the problem in z
+
+# changing to one where there is no air cone
+Omega = 4.5  # rad/s
+Zmax = 10.0 # m, range allowed for the problem in z
 
 # -------------------
 # Numerical settings
@@ -39,6 +46,7 @@ Nr, Nz = 30, 50       # grid resolution (tune as desired)
 dt = 0.0004              # s (keep CFL = u*dt/dr <= ~0.5; here u ~ ΩR ≈ 31.4 m/s → dr ≈ R/Nr)
 dt = 0.001 # cheating
 max_iter = 1000          # SIMPLE iterations
+max_iter = 1000000          # SIMPLE iterations
 alpha_p = 0.7           # pressure under-relaxation
 tol_div = 1e-8
 
@@ -66,7 +74,7 @@ bc = {
 # Solve
 # -------------------
 out = simple_solve_swirl(
-    Nr=Nr, Nz=Nz, R=R, H=H, Zmin=0.0, Zmax=4*H,
+    Nr=Nr, Nz=Nz, R=R, H=H, Zmin=0.0, Zmax=Zmax,
     rho=rho, mu=mu, g=g,
     dt=dt, max_iter=max_iter, alpha_p=alpha_p, tol_div=tol_div, verbose=True,
     bc=bc

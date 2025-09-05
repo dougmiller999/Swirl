@@ -1,0 +1,28 @@
+PRIORITIES LIST
+-----------------
+[] inflowing wall and a drain on the bottom,
+[] restart capability, which is also a way to put in an approximate
+   guess to start with (cut way down on iterations needed).
+[] angled walls so we can try a funnel
+[] some way to test all that for correctness.
+[] convergence study 
+[] Convert to Jax
+[] Make it go in parallel!
+[] profile for speed
+-----------------
+DONE
+[25/09/05] successfully run rotating bucket, slow omega (floor covered)
+[25/09/04] successfully run rotating bucket, fast omega (air core)
+[25/09/03] pass hydrostatic gravity test
+[25/09/03] use Poisson pressure projection to solve N-S incompressible
+           (P,ur,ut,uz) system in Python.
+
+## Where we are today, FRI September  5, 2025 (we are 4 days in).
+
+
+We have a 2DRZ steady state incompressible Navier-Stokes solver that
+is producing results that compare well on solid-body-rotation analytic
+solutions for the "rotating bucket" problem at two different rotation
+speeds (one high enough to produce an air core in the middle, one low
+enough that the floor of the bucket is covered with liquid).  
+
