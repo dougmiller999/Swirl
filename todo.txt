@@ -8,9 +8,9 @@ PRIORITIES LIST
 [] convergence study 
 [] Convert to Jax
 [] Make it go in parallel!
-[] profile for speed
 -----------------
 DONE
+[25/09/05] added profiling, vectorized slow routines, about 7x speedup.
 [25/09/05] successfully run rotating bucket, slow omega (floor covered)
 [25/09/04] successfully run rotating bucket, fast omega (air core)
 [25/09/03] pass hydrostatic gravity test
@@ -18,8 +18,6 @@ DONE
            (P,ur,ut,uz) system in Python.
 
 ## Where we are today, FRI September  5, 2025 (we are 4 days in).
-
-
 We have a 2DRZ steady state incompressible Navier-Stokes solver that
 is producing results that compare well on solid-body-rotation analytic
 solutions for the "rotating bucket" problem at two different rotation

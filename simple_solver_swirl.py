@@ -168,6 +168,65 @@ def _apply_ut_boundary(u_t: Array, grid, bc):
         u_t[:,-1] = u_t[:,-2]
 
 def _update_utheta(u_t: Array, u_r: Array, u_z: Array, grid, nu: float, dt: float, bc) -> Array:
+    """
+    Vectorized explicit Euler update for u_theta with upwind advection and
+    centered diffusion (axisymmetric), plus -nu * u_t / r^2 sink.
+    Shapes:
+      u_t: (Nr, Nz)              [cell centers]
+      u_r: (Nr+1, Nz)            [radial faces]
+      u_z: (Nr,   Nz+1)          [axial faces]
+    """
+    Nr, Nz = u_t.shape
+    r_c, z_c = grid.r_c, grid.z_c
+    V   = grid.V
+    A_e, A_w, A_n, A_s = grid.A_e, grid.A_w, grid.A_n, grid.A_s
+
+    # --- Build neighbor fields (ghost via copy) ---
+    uP = u_t
+    uE = np.empty_like(u_t); uE[:-1, :] = u_t[1:, :];  uE[-1, :] = u_t[-1, :]
+    uW = np.empty_like(u_t); uW[1:,  :] = u_t[:-1, :]; uW[0,  :] = u_t[0,  :]
+    uN = np.empty_like(u_t); uN[:, :-1] = u_t[:, 1:];  uN[:, -1] = u_t[:, -1]
+    uS = np.empty_like(u_t); uS[:, 1: ] = u_t[:, :-1]; uS[:,  0] = u_t[:,  0]
+
+    # --- Face mass fluxes (already include axisymmetric areas) ---
+    Phi_e = u_r[1:,  :] * A_e        # (Nr, Nz) east
+    Phi_w = u_r[:-1, :] * A_w        # (Nr, Nz) west
+    Phi_n = u_z[:, 1:] * A_n         # (Nr, Nz) north
+    Phi_s = u_z[:, :-1] * A_s        # (Nr, Nz) south
+
+    # --- Upwind values on faces (vectorized) ---
+    u_e = np.where(Phi_e >= 0.0, uP, uE)
+    u_w = np.where(Phi_w >= 0.0, uW, uP)
+    u_n = np.where(Phi_n >= 0.0, uP, uN)
+    u_s = np.where(Phi_s >= 0.0, uS, uP)
+
+    # --- Convective divergence ---
+    conv = (Phi_e * u_e - Phi_w * u_w + Phi_n * u_n - Phi_s * u_s) / V
+
+    # --- Diffusion (centered) ---
+    grad_e = (uE - uP) / grid.dr_e;   grad_e[-1, :] = 0.0    # no east neighbor at i=Nr-1
+    grad_w = (uP - uW) / grid.dr_w;   grad_w[0,  :] = 0.0    # no west neighbor at i=0
+    grad_n = (uN - uP) / grid.dz_n;   grad_n[:, -1] = 0.0    # no north neighbor at j=Nz-1
+    grad_s = (uP - uS) / grid.dz_s;   grad_s[:,  0] = 0.0    # no south neighbor at j=0
+
+    diff_e = nu * A_e * grad_e
+    diff_w = nu * A_w * grad_w
+    diff_n = nu * A_n * grad_n
+    diff_s = nu * A_s * grad_s
+
+    diff = (diff_e - diff_w + diff_n - diff_s) / V
+
+    # --- Axisymmetric sink ---
+    sink = -nu * uP * grid.inv_r2   # broadcasts over z
+
+    # --- Explicit update ---
+    u_new = uP + dt * (-conv + diff + sink)
+
+    # Enforce u_theta boundary conditions (Dirichlet/Neumann)
+    _apply_ut_boundary(u_new, grid, bc)
+    return u_new
+
+def old_update_utheta(u_t: Array, u_r: Array, u_z: Array, grid, nu: float, dt: float, bc) -> Array:
     """One explicit Euler step for u_theta with upwind convection and diffusion (axisymmetric)."""
     Nr, Nz = grid.Nr, grid.Nz
     u_new = u_t.copy()
@@ -226,46 +285,65 @@ def _update_utheta(u_t: Array, u_r: Array, u_z: Array, grid, nu: float, dt: floa
     _apply_ut_boundary(u_new, grid, bc)
     return u_new
 
-def grad_p_on_faces(p: Array, r_c: Array, z_c: Array):
-    """Pressure gradients to faces (interior) for correction/predictor steps."""
+def grad_p_on_faces(p, grid):
+    """
+    Vectorized pressure gradients to faces on the staggered axisymmetric grid.
+
+    Parameters
+    ----------
+    p : (Nr, Nz)        cell-centered pressure
+    grid : provides r_c, z_c; optionally dr_e (Nr,1), dz_n (1,Nz)
+
+    Returns
+    -------
+    dpdr : (Nr+1, Nz)   radial-face grad p (interior faces filled, boundaries 0)
+    dpdz : (Nr, Nz+1)   axial-face  grad p (interior faces filled, boundaries 0)
+    """
     Nr, Nz = p.shape
-    dpdr = np.zeros((Nr+1, Nz))
-    for j in range(Nz):
-        for i_face in range(1, Nr):
-            iW = i_face - 1; iE = i_face
-            dr_face = r_c[iE] - r_c[iW]
-            dpdr[i_face, j] = (p[iE, j] - p[iW, j]) / dr_face
-    dpdz = np.zeros((Nr, Nz+1))
-    for i in range(Nr):
-        for j_face in range(1, Nz):
-            jS = j_face - 1; jN = j_face
-            dz_face = z_c[jN] - z_c[jS]
-            dpdz[i, j_face] = (p[i, jN] - p[i, jS]) / dz_face
+
+    # --- radial faces (Nr+1, Nz) ---
+    dpdr = np.zeros((Nr+1, Nz), dtype=p.dtype)
+    # spacings at interior faces (i_face = 1..Nr-1)
+    dr_face = grid.dr_e[:-1, 0]          # (Nr-1,)
+    num_r = p[1:, :] - p[:-1, :]             # (Nr-1, Nz)
+    dpdr[1:Nr, :] = num_r / dr_face[:, None] # broadcast over z
+
+    # --- axial faces (Nr, Nz+1) ---
+    dpdz = np.zeros((Nr, Nz+1), dtype=p.dtype)
+    dz_face = grid.dz_n[0, :-1]          # (Nz-1,)
+    num_z = p[:, 1:] - p[:, :-1]             # (Nr, Nz-1)
+    dpdz[:, 1:Nz] = num_z / dz_face[None, :] # broadcast over r
+
     return dpdr, dpdz
 
-def laplacian_faces(u_face: Array, dr: float, dz: float, orient='r'):
-    """Simple 5-pt Laplacian on face grids (uniform spacing)."""
+import numpy as np
+
+def laplacian_faces(u_face, dr, dz, orient='r'):
+    """
+    Vectorized Laplacian on face grids (uniform spacings).
+    - orient='r': u_face shape (Nr+1, Nz), fills interior i=1..Nr-1
+    - orient='z': u_face shape (Nr,   Nz+1), fills interior j=1..Nz-1
+    Homogeneous Dirichlet outside the domain (zero padding), same as your loop version.
+    """
     if orient == 'r':
         Nr_p1, Nz = u_face.shape
-        Nr = Nr_p1 - 1
+        # r-second-derivative on interior radial faces
+        d2r = (u_face[2:, :] - 2.0*u_face[1:-1, :] + u_face[:-2, :]) / (dr*dr)
+        # z-second-derivative with zero padding at top/bottom
+        u_pad = np.pad(u_face[1:-1, :], ((0,0),(1,1)), mode='constant', constant_values=0.0)
+        d2z = (u_pad[:, 2:] - 2.0*u_pad[:, 1:-1] + u_pad[:, :-2]) / (dz*dz)
         lap = np.zeros_like(u_face)
-        for j in range(Nz):
-            for i_face in range(1, Nr):
-                lap[i_face, j] = (
-                    (u_face[i_face+1, j] - 2*u_face[i_face, j] + u_face[i_face-1, j])/(dr*dr) +
-                    ( (u_face[i_face, j-1] if j>0 else 0.0) - 2*u_face[i_face, j] + (u_face[i_face, j+1] if j<Nz-1 else 0.0) )/(dz*dz)
-                )
+        lap[1:-1, :] = d2r + d2z
         return lap
     else:
         Nr, Nz_p1 = u_face.shape
-        Nz = Nz_p1 - 1
+        # z-second-derivative on interior axial faces
+        d2z = (u_face[:, 2:] - 2.0*u_face[:, 1:-1] + u_face[:, :-2]) / (dz*dz)
+        # r-second-derivative with zero padding at axis/wall
+        u_pad = np.pad(u_face[:, 1:-1], ((1,1),(0,0)), mode='constant', constant_values=0.0)
+        d2r = (u_pad[2:, :] - 2.0*u_pad[1:-1, :] + u_pad[:-2, :]) / (dr*dr)
         lap = np.zeros_like(u_face)
-        for i in range(Nr):
-            for j_face in range(1, Nz):
-                lap[i, j_face] = (
-                    ( (u_face[i-1, j_face] if i>0 else 0.0) - 2*u_face[i, j_face] + (u_face[i+1, j_face] if i<Nr-1 else 0.0) )/(dr*dr) +
-                    (u_face[i, j_face+1] - 2*u_face[i, j_face] + u_face[i, j_face-1])/(dz*dz)
-                )
+        lap[:, 1:-1] = d2r + d2z
         return lap
 
 def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
@@ -295,7 +373,7 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
     history = []
     for it in range(1, max_iter+1):
         # Predictor for meridional velocities
-        dpdr, dpdz = grad_p_on_faces(p, grid.r_c, grid.z_c)
+        dpdr, dpdz = grad_p_on_faces(p, grid)
         u_r_star = u_r - (dt/rho)*dpdr
         u_z_star = u_z - (dt/rho)*dpdz - dt*g
 
@@ -328,8 +406,7 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         # Update pressure and correct velocities
         oldP = p.copy()
         p += alpha_p * p_prime
-        dpdr_p, dpdz_p = grad_p_on_faces(p_prime, grid.r_c, grid.z_c)
-        # dpdr_p, dpdz_p = grad_p_on_faces(alpha_p*p_prime, grid.r_c, grid.z_c)
+        dpdr_p, dpdz_p = grad_p_on_faces(p_prime, grid)
         u_r = u_r_star - (dt/rho) * dpdr_p
         u_z = u_z_star - (dt/rho) * dpdz_p
 
@@ -347,20 +424,20 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         hist_ut = np.max(np.abs(_update_utheta(u_t, u_r, u_z, grid, nu, 0.0, bc) - u_t))  # zero dt -> just BC reapply
         history.append((it, max_div, res_p, hist_ut))
 
-        if verbose and (it % 200 == 0 or it == 1):
+        if verbose and (it % 1000 == 0 or it == 1):
             print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
 
-        if (it % 20000 == 0 or it == 1):
-            # -------------------
-            # Plot: pressure colormap + u_theta contours
-            # -------------------
-            # adjust to keep mass conservation
-            V_target = np.pi * (grid.R**2) * H          # your known fill volume
-            c = choose_pressure_offset_for_volume(p, grid, V_target, patm=0.0)
-            p += c # now the P=0 contour will contain our mass
-            plot_pressure_contours(p, grid,
-                                   title='Rotating bucket: pressure contours %d iters' % (it),
-                                   unit='bar', scale=1e5, n_contours=10)
+        # if (it % 20000 == 0 or it == 1):
+        #     # -------------------
+        #     # Plot: pressure colormap + u_theta contours
+        #     # -------------------
+        #     # adjust to keep mass conservation
+        #     V_target = np.pi * (grid.R**2) * H          # your known fill volume
+        #     c = choose_pressure_offset_for_volume(p, grid, V_target, patm=0.0)
+        #     p += c # now the P=0 contour will contain our mass
+        #     plot_pressure_contours(p, grid,
+        #                            title='Rotating bucket: pressure contours %d iters' % (it),
+        #                            unit='bar', scale=1e5, n_contours=10)
             
 
         # if max_div < tol_div and res_p < 1e-8:

@@ -20,6 +20,11 @@ Run:
 import numpy as np
 from simple_solver_swirl import simple_solve_swirl, plot_pressure_with_swirl, plot_streamlines
 from simple_solver_swirl import plot_pressure_contours, choose_pressure_offset_for_volume
+
+import cProfile
+
+graphics = True
+
 # -------------------
 # Problem parameters
 # -------------------
@@ -73,12 +78,19 @@ bc = {
 # -------------------
 # Solve
 # -------------------
+# profiler = cProfile.Profile()
+# profiler.enable()
+
 out = simple_solve_swirl(
     Nr=Nr, Nz=Nz, R=R, H=H, Zmin=0.0, Zmax=Zmax,
     rho=rho, mu=mu, g=g,
     dt=dt, max_iter=max_iter, alpha_p=alpha_p, tol_div=tol_div, verbose=True,
     bc=bc
 )
+
+# profiler.disable()
+# profiler.print_stats(sort='cumulative')
+
 p, u_t, u_r, u_z, grid = out['p'], out['u_t'], out['u_r'], out['u_z'], out['grid']
 
 # adjust to keep mass conservation
@@ -86,43 +98,44 @@ V_target = np.pi * (grid.R**2) * H          # your known fill volume
 c = choose_pressure_offset_for_volume(p, grid, V_target, patm=0.0)
 p += c # now the P=0 contour will contain our mass
 
-# -------------------
-# Plot: pressure colormap
-# -------------------
-plot_pressure_contours(p, grid,
-                       title='Rotating bucket: pressure contours',
-                       unit='bar', scale=1e5, n_contours=10)
+if graphics:
+    # -------------------
+    # Plot: pressure colormap
+    # -------------------
+    plot_pressure_contours(p, grid,
+                           title='Rotating bucket: pressure contours',
+                           unit='bar', scale=1e5, n_contours=10)
 
-# -------------------
-# Plot: pressure colormap + u_theta contours
-# -------------------
-plot_pressure_with_swirl(p, u_t, grid,
-                         title=f'Rotating bucket: pressure (colormap) + u_theta contours (100 rpm)',
-                         unit='bar', scale=1e5, show_contours=True, n_contours=18)
+    # -------------------
+    # Plot: pressure colormap + u_theta contours
+    # -------------------
+    plot_pressure_with_swirl(p, u_t, grid,
+                             title=f'Rotating bucket: pressure (colormap) + u_theta contours (100 rpm)',
+                             unit='bar', scale=1e5, show_contours=True, n_contours=18)
 
-# # -------------------
-# # Plot: meridional streamlines
-# # -------------------
-# plot_streamlines(u_r, u_z, grid, density=1.3, title='Meridional streamlines (u_r, u_z)')
+    # # -------------------
+    # # Plot: meridional streamlines
+    # # -------------------
+    # plot_streamlines(u_r, u_z, grid, density=1.3, title='Meridional streamlines (u_r, u_z)')
 
-# # -------------------
-# # Optional: overlay theoretical free surface (solid-body) using plot_utils_rz if present
-# # z(r) = z0 + (Ω^2 r^2) / (2g), where z0 is chosen so <z> = H ⇒ z0 = H - Ω^2 R^2/(4g).
-# # -------------------
-# try:
-#     from plot_utils_rz import plot_pressure_rz_with_overlays
-#     z0 = H - (Omega**2 * R**2) / (4.0*g)
-#     def z_free_of_r(r):
-#         return z0 + (Omega**2) * r**2 / (2.0*g)
-#     plot_pressure_rz_with_overlays(
-#         p, grid.r_edges, grid.z_edges,
-#         title='Pressure with theoretical free-surface overlay',
-#         unit='bar', scale=1e5,
-#         z_free=lambda rc: z_free_of_r(rc),  # callable z(r) evaluated on r-centers
-#         r_core=None, show_contours=True, n_contours=16
-#     )
-# except ImportError:
-#     pass
+    # # -------------------
+    # # Optional: overlay theoretical free surface (solid-body) using plot_utils_rz if present
+    # # z(r) = z0 + (Ω^2 r^2) / (2g), where z0 is chosen so <z> = H ⇒ z0 = H - Ω^2 R^2/(4g).
+    # # -------------------
+    # try:
+    #     from plot_utils_rz import plot_pressure_rz_with_overlays
+    #     z0 = H - (Omega**2 * R**2) / (4.0*g)
+    #     def z_free_of_r(r):
+    #         return z0 + (Omega**2) * r**2 / (2.0*g)
+    #     plot_pressure_rz_with_overlays(
+    #         p, grid.r_edges, grid.z_edges,
+    #         title='Pressure with theoretical free-surface overlay',
+    #         unit='bar', scale=1e5,
+    #         z_free=lambda rc: z_free_of_r(rc),  # callable z(r) evaluated on r-centers
+    #         r_core=None, show_contours=True, n_contours=16
+    #     )
+    # except ImportError:
+    #     pass
 
 # Print a few basics
 print('Omega [rad/s]=', Omega)
