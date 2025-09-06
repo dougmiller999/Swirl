@@ -1,6 +1,7 @@
 PRIORITIES LIST
 -----------------
 [] inflowing wall and a drain on the bottom,
+[] top boundary to limit how high the fluid climbs
 [] restart capability, which is also a way to put in an approximate
    guess to start with (cut way down on iterations needed).
 [] angled walls so we can try a funnel

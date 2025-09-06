@@ -48,10 +48,6 @@ def build_grid(Nr: int, Nz: int, R: float, Zmin: float, Zmax: float) -> Grid:
     dr_w = np.empty((Nr, 1)); dr_w[1:,  0] = r_c[1:] - r_c[:-1]; dr_w[0,  0] = 1.0
     dz_n = np.empty((1, Nz)); dz_n[0, :-1] = z_c[1:] - z_c[:-1]; dz_n[0, -1] = 1.0
     dz_s = np.empty((1, Nz)); dz_s[0, 1: ] = z_c[1:] - z_c[:-1]; dz_s[0,  0] = 1.0
-    # dr_e = np.empty(Nr); dr_e[:-1] = r_c[1:] - r_c[:-1]; dr_e[-1] = np.nan
-    # dr_w = np.empty(Nr); dr_w[1:]  = r_c[1:] - r_c[:-1]; dr_w[0]  = np.nan
-    # dz_n = np.empty(Nz); dz_n[:-1] = z_c[1:] - z_c[:-1]; dz_n[-1] = np.nan
-    # dz_s = np.empty(Nz); dz_s[1:]  = z_c[1:] - z_c[:-1]; dz_s[0]  = np.nan
     inv_r2 = np.zeros((Nr,1))
     mask = (r_c > 0.0)
     inv_r2[mask,0] = 1.0 / (r_c[mask] ** 2)
@@ -92,14 +88,6 @@ def divergence_from_face_fluxes(u_r: Array, u_z: Array, grid: Grid) -> Array:
     Phi_n = u_z[:, 1:] * grid.A_n
     Phi_s = u_z[:, :-1] * grid.A_s
     div = (Phi_e - Phi_w + Phi_n - Phi_s) / grid.V
-    
-    # for j in range(Nz):
-    #     for i in range(Nr):
-    #         Phi_e = u_r[i+1, j] * grid.A_e[i, j]
-    #         Phi_w = u_r[i,   j] * grid.A_w[i, j]
-    #         Phi_n = u_z[i, j+1] * grid.A_n[i, j]
-    #         Phi_s = u_z[i, j  ] * grid.A_s[i, j]
-    #         div[i,j] = (Phi_e - Phi_w + Phi_n - Phi_s) / grid.V[i,j]
     return div
 
 def correct_face_velocities(u_r_star: Array, u_z_star: Array, p: Array,

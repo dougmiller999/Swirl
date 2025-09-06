@@ -44,35 +44,45 @@ from axisym_poisson_projection import (
     anchor_pressure
 )
 
+from bc_segments_patch import (
+    apply_boundary_normal_segmented,
+    apply_ut_boundary_segmented,
+    poisson_rhs_with_bc_segmented,
+    integrate_wall_inflow_rR,
+    make_bottom_drain_profile_auto,
+)
+
 Array = np.ndarray
 # Profile = float | Array | Callable[[Array], Array]
 from typing import Union
 Profile = Union[float , Array , Callable[[Array], Array]]
 
+def _mask_on_r_wall_segment(grid, z0, z1):
+    zc = grid.z_c  # (Nz,)
+    return (zc >= min(z0,z1)) & (zc <= max(z0,z1))  # (Nz,)
+
+def _mask_on_z_bottom_segment(grid, r0, r1):
+    rc = grid.r_c  # (Nr,)
+    return (rc >= min(r0,r1)) & (rc <= max(r0,r1))  # (Nr,)
+
 def _as_profile_r(values: Profile, r_centers: Array) -> Array:
     """Normalize a profile spec (scalar/array/callable) to an array on r-centers (len Nr)."""
-    Nr = len(r_centers)
-    if callable(values):
-        arr = np.asarray(values(r_centers), dtype=float)
-        assert arr.shape == (Nr,), "Callable profile must return length Nr."
-        return arr
-    arr = np.asarray(values, dtype=float)
-    if arr.ndim == 0:
-        return np.full(Nr, float(arr))
-    assert arr.shape == (Nr,), "Array profile must be length Nr."
+    if callable(values): arr = np.asarray(values(r_centers), float)
+    else:
+        arr = np.asarray(values, float)
+        if arr.ndim == 0: arr = np.full_like(r_centers, float(values))
+    assert arr.shape == (len(r_centers),)
     return arr
 
 def _as_profile_z(values: Profile, z_centers: Array) -> Array:
     """Normalize a profile spec (scalar/array/callable) to an array on z-centers (len Nz)."""
-    Nz = len(z_centers)
     if callable(values):
         arr = np.asarray(values(z_centers), dtype=float)
-        assert arr.shape == (Nz,), "Callable profile must return length Nz."
-        return arr
-    arr = np.asarray(values, dtype=float)
-    if arr.ndim == 0:
-        return np.full(Nz, float(arr))
-    assert arr.shape == (Nz,), "Array profile must be length Nz."
+    else:
+        arr = np.asarray(values, dtype=float)
+        if arr.ndim == 0:
+            arr = np.full(len(z_centers), float(arr))
+    assert arr.shape == (len(z_centers),), "Array profile must be length Nz."
     return arr
 
 def _apply_boundary_normal(u_r: Array, u_z: Array, grid, bc: Dict[str, Dict[str, Tuple[str, Profile]]]):
@@ -81,56 +91,134 @@ def _apply_boundary_normal(u_r: Array, u_z: Array, grid, bc: Dict[str, Dict[str,
     r_c = grid.r_c
 
     # Defaults: walls (no-penetration)
-    r0_kind, r0_prof = bc.get('r=0',   {}).get('u_r', ('wall', 0.0))
-    rR_kind, rR_prof = bc.get('r=R',   {}).get('u_r', ('wall', 0.0))
-    z0_kind, z0_prof = bc.get('z=Zmin',{}).get('u_z', ('wall', 0.0))
-    zN_kind, zN_prof = bc.get('z=Zmax',{}).get('u_z', ('wall', 0.0))
+    u_r[0,:]  = 0.0  # r=0 axis
+    u_r[-1,:] = 0.0  # r=R wall (may be overwritten by segments)
+    u_z[:,0]  = 0.0  # z=Zmin wall (may be overwritten by drain)
+    u_z[:,-1] = 0.0  # z=Zmax wall (may be overwritten)
 
-    if r0_kind in ('wall','symmetry'): u_r[0, :]  = 0.0
-    if rR_kind in ('wall',):           u_r[-1, :] = 0.0
-    if z0_kind in ('wall','symmetry'): u_z[:, 0]  = 0.0
-    if zN_kind in ('wall',):           u_z[:, -1] = 0.0
+     # r=R segmented inlet/outlet
+    rR = bc.get('r=R', {})
+    if 'u_r' in rR:
+        spec = rR['u_r']
+        if isinstance(spec, list):
+            for kind, payload in spec:
+                if kind == 'segment':
+                    z0, z1, prof = payload
+                    m = _mask_on_r_wall_segment(grid, z0, z1)     # (Nz,)
+                    val = _as_profile_z(prof, z_c)                 # (Nz,)
+                    u_r[-1, m] = val[m]
+        elif isinstance(spec, tuple) and spec[0] in ('inlet','outlet'):
+            # backward compat: whole-edge profile
+            val = _as_profile_z(spec[1], z_c)
+            u_r[-1,:] = val
+   
+    # z=Zmin bottom drain or segments
+    z0 = bc.get('z=Zmin', {})
+    if 'u_z' in z0:
+        kind, payload = z0['u_z'] if isinstance(z0['u_z'], tuple) else (None, None)
+        if kind == 'drain_auto':
+            pass  # handled after we compute total inflow (see section C)
+        elif kind == 'segment':
+            r0, r1, prof = payload
+            m = _mask_on_z_bottom_segment(grid, r0, r1)  # (Nr,)
+            val = _as_profile_r(prof, r_c)
+            u_z[m, 0] = val[m]
+        elif kind in ('inlet','outlet'):  # whole-edge
+            val = _as_profile_r(payload, r_c)
+            u_z[:,0] = val
 
-    if z0_kind in ('inlet','outlet'):
-        prof = _as_profile_r(z0_prof, r_c)
-        u_z[:, 0] = prof
-    if zN_kind in ('inlet','outlet'):
-        prof = _as_profile_r(zN_prof, r_c)
-        u_z[:, -1] = prof
-
-    if rR_kind in ('inlet','outlet'):
-        if np.ndim(rR_prof)==0:
-            u_r[-1, :] = float(rR_prof)
-        else:
-            raise ValueError("For r=R inlet/outlet, provide a scalar normal velocity for now.")
-
-def _poisson_rhs_with_bc(grid, u_r_star: Array, u_z_star: Array, dt: float, rho: float,
-                         bc: Dict[str, Dict[str, Tuple[str, Profile]]]) -> Array:
+def _poisson_rhs_with_bc(grid, u_r_star, u_z_star, dt, rho, bc):
     """RHS for pressure-correction Poisson including Neumann terms for inlet/outlet targets."""
     Nr, Nz = grid.Nr, grid.Nz
-    A_e, A_w, A_n, A_s, V = grid.A_e, grid.A_w, grid.A_n, grid.A_s, grid.V
-    r_c = grid.r_c
-    rhs = -(divergence_from_face_fluxes(u_r_star, u_z_star, grid).reshape(Nr, Nz)) / dt
+    rhs = -(divergence_from_face_fluxes(u_r_star, u_z_star, grid)) / dt  # (Nr,Nz)
+    # r=R segments → east faces of column i=Nr-1
+    rR = bc.get('r=R', {})
+    if 'u_r' in rR:
+        spec = rR['u_r']
+        if isinstance(spec, list):
+            for kind, payload in spec:
+                if kind == 'segment':
+                    z0, z1, prof = payload
+                    m = _mask_on_r_wall_segment(grid, z0, z1)           # (Nz,)
+                    val = _as_profile_z(prof, grid.z_c)                  # (Nz,)
+                    i = Nr-1
+                    rhs[i, m] += (grid.A_e[i, m] / (grid.V[i, m] * dt)) * (u_r_star[i+1, m] - val[m])
+        elif isinstance(spec, tuple) and spec[0] in ('inlet','outlet'):
+            val = _as_profile_z(spec[1], grid.z_c)
+            i = Nr-1
+            rhs[i, :] += (grid.A_e[i, :] / (grid.V[i, :] * dt)) * (u_r_star[i+1, :] - val[:])
 
-    z0_kind, z0_prof = bc.get('z=Zmin',{}).get('u_z', ('wall', 0.0))
-    zN_kind, zN_prof = bc.get('z=Zmax',{}).get('u_z', ('wall', 0.0))
-    rR_kind, rR_prof = bc.get('r=R',   {}).get('u_r', ('wall', 0.0))
+    # z=Zmin segments / drain handled similarly when known (see section C)
+    # ...
+    return rhs.ravel(order='F')
 
-    if z0_kind in ('inlet','outlet'):
-        prof = _as_profile_r(z0_prof, r_c)
-        for i in range(Nr):
-            rhs[i,0] += (A_s[i,0] / (V[i,0] * dt)) * (u_z_star[i,0] - prof[i])
-    if zN_kind in ('inlet','outlet'):
-        prof = _as_profile_r(zN_prof, r_c)
-        j = Nz-1
-        for i in range(Nr):
-            rhs[i,j] += (A_n[i,j] / (V[i,j] * dt)) * (u_z_star[i,j+1] - prof[i])
-    if rR_kind in ('inlet','outlet'):
-        i = Nr-1
-        for j in range(Nz):
-            rhs[i,j] += (A_e[i,j] / (V[i,j] * dt)) * (u_r_star[i+1,j] - float(rR_prof))
+# def _poisson_rhs_with_bc(grid, u_r_star: Array, u_z_star: Array, dt: float, rho: float,
+#                          bc: Dict[str, Dict[str, Tuple[str, Profile]]]) -> Array:
+#     """RHS for pressure-correction Poisson including Neumann terms for inlet/outlet targets."""
+#     Nr, Nz = grid.Nr, grid.Nz
+#     A_e, A_w, A_n, A_s, V = grid.A_e, grid.A_w, grid.A_n, grid.A_s, grid.V
+#     r_c = grid.r_c
+#     rhs = -(divergence_from_face_fluxes(u_r_star, u_z_star, grid).reshape(Nr, Nz)) / dt
 
-    return rhs.flatten(order='F')
+#     z0_kind, z0_prof = bc.get('z=Zmin',{}).get('u_z', ('wall', 0.0))
+#     zN_kind, zN_prof = bc.get('z=Zmax',{}).get('u_z', ('wall', 0.0))
+#     rR_kind, rR_prof = bc.get('r=R',   {}).get('u_r', ('wall', 0.0))
+
+#     if z0_kind in ('inlet','outlet'):
+#         prof = _as_profile_r(z0_prof, r_c)
+#         for i in range(Nr):
+#             rhs[i,0] += (A_s[i,0] / (V[i,0] * dt)) * (u_z_star[i,0] - prof[i])
+#     if zN_kind in ('inlet','outlet'):
+#         prof = _as_profile_r(zN_prof, r_c)
+#         j = Nz-1
+#         for i in range(Nr):
+#             rhs[i,j] += (A_n[i,j] / (V[i,j] * dt)) * (u_z_star[i,j+1] - prof[i])
+#     if rR_kind in ('inlet','outlet'):
+#         i = Nr-1
+#         for j in range(Nz):
+#             rhs[i,j] += (A_e[i,j] / (V[i,j] * dt)) * (u_r_star[i+1,j] - float(rR_prof))
+
+#     return rhs.flatten(order='F')
+
+def integrate_wall_inflow_rR(bc, grid):
+    """Compute total inflow (positive) prescribed on r=R from bc segments."""
+    rR = bc.get('r=R', {})
+    if 'u_r' not in rR: return 0.0
+    zc = grid.z_c; dz = grid.z_edges[1:] - grid.z_edges[:-1]
+    Q = 0.0
+    R = grid.r_edges[-1]
+    if isinstance(rR['u_r'], list):
+        for kind, payload in rR['u_r']:
+            if kind == 'segment':
+                z0, z1, prof = payload
+                m = _mask_on_r_wall_segment(grid, z0, z1)
+                val = _as_profile_z(prof, zc)
+                # positive val means inflow *into* domain
+                Q += np.sum((val[m]) * (2*np.pi*R) * dz[m])
+    elif isinstance(rR['u_r'], tuple) and rR['u_r'][0] in ('inlet','outlet'):
+        val = _as_profile_z(rR['u_r'][1], zc)
+        Q += np.sum(val * (2*np.pi*R) * dz)
+    return float(Q)
+
+def make_bottom_drain_profile_auto(bc, grid, Q_in):
+    """Return u_z_bottom (Nr,) so that ∫ 2π r u_z dr = -Q_in over specified region."""
+    z0 = bc.get('z=Zmin', {})
+    if 'u_z' not in z0:  # nothing to do
+        return None
+    kind, payload = z0['u_z']
+    if kind != 'drain_auto':
+        return None
+    rc = grid.r_c; dr = grid.r_edges[1:] - grid.r_edges[:-1]
+    r0, r1 = payload.get('region', (rc[0], rc[-1]))
+    f = _as_profile_r(payload['profile_r'], rc)  # shape (Nr,)
+    m = _mask_on_z_bottom_segment(grid, r0, r1)
+    denom = np.sum(2*np.pi*rc[m]*f[m]*dr[m])
+    if abs(denom) < 1e-12:
+        return np.zeros_like(rc)
+    s = Q_in / denom
+    u_bottom = np.zeros_like(rc)
+    u_bottom[m] = - s * f[m]
+    return u_bottom
 
 def _apply_ut_boundary(u_t: Array, grid, bc):
     """Apply u_theta boundary conditions (Dirichlet or Neumann)."""
@@ -223,66 +311,7 @@ def _update_utheta(u_t: Array, u_r: Array, u_z: Array, grid, nu: float, dt: floa
     u_new = uP + dt * (-conv + diff + sink)
 
     # Enforce u_theta boundary conditions (Dirichlet/Neumann)
-    _apply_ut_boundary(u_new, grid, bc)
-    return u_new
-
-def old_update_utheta(u_t: Array, u_r: Array, u_z: Array, grid, nu: float, dt: float, bc) -> Array:
-    """One explicit Euler step for u_theta with upwind convection and diffusion (axisymmetric)."""
-    Nr, Nz = grid.Nr, grid.Nz
-    u_new = u_t.copy()
-
-    r_c = grid.r_c; z_c = grid.z_c
-    V   = grid.V; A_e, A_w, A_n, A_s = grid.A_e, grid.A_w, grid.A_n, grid.A_s
-
-    # center-to-center distances (uniform if grid was built linear)
-    dr_e = np.empty(Nr); dr_e[:-1] = r_c[1:] - r_c[:-1]; dr_e[-1] = np.nan
-    dr_w = np.empty(Nr); dr_w[1:]  = r_c[1:] - r_c[:-1]; dr_w[0]  = np.nan
-    dz_n = np.empty(Nz); dz_n[:-1] = z_c[1:] - z_c[:-1]; dz_n[-1] = np.nan
-    dz_s = np.empty(Nz); dz_s[1:]  = z_c[1:] - z_c[:-1]; dz_s[0]  = np.nan
-
-    # Upwind helper
-    def upwind(phiP, phiN, flux):
-        return phiP if flux >= 0.0 else phiN
-
-    for j in range(Nz):
-        for i in range(Nr):
-            # Mass fluxes on faces
-            Phi_e = u_r[i+1, j] * A_e[i, j]  # east face
-            Phi_w = u_r[i,   j] * A_w[i, j]  # west face
-            Phi_n = u_z[i, j+1] * A_n[i, j]  # north face
-            Phi_s = u_z[i, j  ] * A_s[i, j]  # south face
-
-            # Neighbor values with clamping at boundaries (ghost via copy)
-            uP = u_t[i,j]
-            uE = u_t[i+1,j] if i < Nr-1 else uP
-            uW = u_t[i-1,j] if i > 0     else uP
-            uN = u_t[i,j+1] if j < Nz-1 else uP
-            uS = u_t[i,j-1] if j > 0     else uP
-
-            # Upwind face values
-            u_e = upwind(uP, uE, Phi_e)
-            u_w = upwind(uW, uP, Phi_w)
-            u_n = upwind(uP, uN, Phi_n)
-            u_s = upwind(uS, uP, Phi_s)
-
-            # Convective divergence
-            conv = (Phi_e*u_e - Phi_w*u_w + Phi_n*u_n - Phi_s*u_s) / V[i,j]
-
-            # Diffusion fluxes (centered)
-            diff_e = nu * A_e[i,j] * ( (uE - uP) / dr_e[i] ) if i < Nr-1 else 0.0
-            diff_w = nu * A_w[i,j] * ( (uP - uW) / dr_w[i] ) if i > 0     else 0.0
-            diff_n = nu * A_n[i,j] * ( (uN - uP) / dz_n[j] ) if j < Nz-1 else 0.0
-            diff_s = nu * A_s[i,j] * ( (uP - uS) / dz_s[j] ) if j > 0     else 0.0
-            diff = (diff_e - diff_w + diff_n - diff_s) / V[i,j]
-
-            # Axisymmetric sink term -nu * u_t / r^2 (avoid r=0 by enforcing u_t=0 there)
-            sink = - nu * (uP / (r_c[i]**2)) if r_c[i] > 0.0 else 0.0
-
-            # Explicit update: ∂u_t/∂t = -conv + diff + sink
-            u_new[i,j] = uP + dt * (-conv + diff + sink)
-
-    # Apply u_theta boundary conditions
-    _apply_ut_boundary(u_new, grid, bc)
+    apply_ut_boundary_segmented(u_new, grid, bc)
     return u_new
 
 def grad_p_on_faces(p, grid):
@@ -365,13 +394,14 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
     u_t = np.zeros((Nr, Nz)) if u_t_init is None else u_t_init.copy()
 
     # Apply initial u_t BCs
-    _apply_ut_boundary(u_t, grid, bc)
+    apply_ut_boundary_segmented(u_t, grid, bc)
 
     # Poisson operator (constant ρ)
     Ap = assemble_poisson_matrix(grid, rho)
 
     history = []
     for it in range(1, max_iter+1):
+
         # Predictor for meridional velocities
         dpdr, dpdz = grad_p_on_faces(p, grid)
         u_r_star = u_r - (dt/rho)*dpdr
@@ -396,14 +426,25 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
             u_z_star += dt * nu * laplacian_faces(u_z, dr, dz, orient='z')
 
         # Apply boundary normal velocities
-        _apply_boundary_normal(u_r_star, u_z_star, grid, bc)
+        apply_boundary_normal_segmented(u_r_star, u_z_star, grid, bc)
 
-        # Pressure-correction Poisson
-        b = _poisson_rhs_with_bc(grid, u_r_star, u_z_star, dt, rho, bc)
+        # set up BC's from injector and drain
+        Q_in = integrate_wall_inflow_rR(bc, grid)
+        u_bottom = make_bottom_drain_profile_auto(bc, grid, Q_in)
+        if u_bottom is not None:
+            u_z_star[:, 0] = u_bottom     # impose predictor normal velocity at bottom
+
+        # # Pressure-correction Poisson RHS
+        # b = _poisson_rhs_with_bc(grid, u_r_star, u_z_star, dt, rho, bc)
+        
+        # build Poisson RHS with segmented Neumann terms
+        b = poisson_rhs_with_bc_segmented(grid, u_r_star, u_z_star, dt, rho, bc)
+        
+        # Solve Poisson
         Ap_anch, b_anch = anchor_pressure(Ap.copy(), b.copy(), idx=0)
         p_prime = spsolve(Ap_anch, b_anch).reshape((Nr, Nz), order='F')
 
-        # Update pressure and correct velocities
+        # Update pressure and correct velocities with p_prime
         oldP = p.copy()
         p += alpha_p * p_prime
         dpdr_p, dpdz_p = grad_p_on_faces(p_prime, grid)
@@ -411,7 +452,7 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         u_z = u_z_star - (dt/rho) * dpdz_p
 
         # Re-enforce boundary normals
-        _apply_boundary_normal(u_r, u_z, grid, bc)
+        apply_boundary_normal_segmented(u_r, u_z, grid, bc)
 
         # Update u_theta explicitly with current (u_r,u_z)
         u_t = _update_utheta(u_t, u_r, u_z, grid, nu, dt, bc)
