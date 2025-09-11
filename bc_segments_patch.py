@@ -185,7 +185,8 @@ def make_bottom_drain_profile_auto(bc, grid, Q_in: float):
     dr = grid.r_edges[1:] - grid.r_edges[:-1]
     f = _as_profile_r(payload['profile_r'], rc)
     r0, r1 = payload.get('region', (rc[0], grid.r_edges[-1]))
-    m = _mask_on_z_bottom_segment(grid, r0, r1)
+    # mask the region blocked by the wall, no drain there
+    m = _mask_on_z_bottom_segment(grid, r0, grid.wall_rmin)
     denom = float(np.sum(2*np.pi * rc[m] * f[m] * dr[m]))
     if abs(denom) < 1e-15:
         return np.zeros_like(rc)

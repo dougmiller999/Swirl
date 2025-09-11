@@ -38,6 +38,14 @@ from __future__ import annotations
 import numpy as np
 from typing import Dict, Tuple, Callable, Any
 from scipy.sparse.linalg import spsolve
+from scipy import sparse
+
+from graphics import (
+    plot_pressure_contours, 
+    plot_pressure_with_swirl,
+    plot_streamlines,
+    choose_pressure_offset_for_volume
+)
 
 from axisym_poisson_projection import (
     build_grid, assemble_poisson_matrix, divergence_from_face_fluxes,
@@ -51,6 +59,16 @@ from bc_segments_patch import (
     integrate_wall_inflow_rR,
     make_bottom_drain_profile_auto,
 )
+
+from internal_wall_mask_patch import (
+    build_slanted_wall_masks,
+    apply_internal_wall_bc,
+    divergence_from_face_fluxes_masked,
+    poisson_rhs_with_bc_segmented_masked,
+    r_wall_of_z,
+)
+
+from kinematic_eta import kinematic_eta_update
 
 Array = np.ndarray
 # Profile = float | Array | Callable[[Array], Array]
@@ -151,34 +169,6 @@ def _poisson_rhs_with_bc(grid, u_r_star, u_z_star, dt, rho, bc):
     # z=Zmin segments / drain handled similarly when known (see section C)
     # ...
     return rhs.ravel(order='F')
-
-# def _poisson_rhs_with_bc(grid, u_r_star: Array, u_z_star: Array, dt: float, rho: float,
-#                          bc: Dict[str, Dict[str, Tuple[str, Profile]]]) -> Array:
-#     """RHS for pressure-correction Poisson including Neumann terms for inlet/outlet targets."""
-#     Nr, Nz = grid.Nr, grid.Nz
-#     A_e, A_w, A_n, A_s, V = grid.A_e, grid.A_w, grid.A_n, grid.A_s, grid.V
-#     r_c = grid.r_c
-#     rhs = -(divergence_from_face_fluxes(u_r_star, u_z_star, grid).reshape(Nr, Nz)) / dt
-
-#     z0_kind, z0_prof = bc.get('z=Zmin',{}).get('u_z', ('wall', 0.0))
-#     zN_kind, zN_prof = bc.get('z=Zmax',{}).get('u_z', ('wall', 0.0))
-#     rR_kind, rR_prof = bc.get('r=R',   {}).get('u_r', ('wall', 0.0))
-
-#     if z0_kind in ('inlet','outlet'):
-#         prof = _as_profile_r(z0_prof, r_c)
-#         for i in range(Nr):
-#             rhs[i,0] += (A_s[i,0] / (V[i,0] * dt)) * (u_z_star[i,0] - prof[i])
-#     if zN_kind in ('inlet','outlet'):
-#         prof = _as_profile_r(zN_prof, r_c)
-#         j = Nz-1
-#         for i in range(Nr):
-#             rhs[i,j] += (A_n[i,j] / (V[i,j] * dt)) * (u_z_star[i,j+1] - prof[i])
-#     if rR_kind in ('inlet','outlet'):
-#         i = Nr-1
-#         for j in range(Nz):
-#             rhs[i,j] += (A_e[i,j] / (V[i,j] * dt)) * (u_r_star[i+1,j] - float(rR_prof))
-
-#     return rhs.flatten(order='F')
 
 def integrate_wall_inflow_rR(bc, grid):
     """Compute total inflow (positive) prescribed on r=R from bc segments."""
@@ -345,8 +335,6 @@ def grad_p_on_faces(p, grid):
 
     return dpdr, dpdz
 
-import numpy as np
-
 def laplacian_faces(u_face, dr, dz, orient='r'):
     """
     Vectorized Laplacian on face grids (uniform spacings).
@@ -375,18 +363,152 @@ def laplacian_faces(u_face, dr, dz, orient='r'):
         lap[:, 1:-1] = d2r + d2z
         return lap
 
+
+def _p_dof_index(i, j, Nr):
+    """Fortran-style (i,j) -> k mapping for p vectorized with order='F'."""
+    return int(i + j * Nr)
+
+def anchor_pressure_exact(A_csr, b, k, value=0.0, keep_spd=True):
+    """Exact Dirichlet at DOF k (CSR/CSC only, no LIL)."""
+    A = A_csr.tocsr(copy=True)
+
+    # zero ROW k, set diag to 1
+    rs, re = A.indptr[k], A.indptr[k+1]
+    A.data[rs:re] = 0.0
+    cols = A.indices[rs:re]
+    hit = np.where(cols == k)[0]
+    if hit.size:
+        A.data[rs + hit[0]] = 1.0
+    else:
+        A += sparse.csr_matrix(([1.0], ([k], [k])), shape=A.shape)
+    b[k] = value
+
+    if keep_spd:
+        # zero COLUMN k except diagonal
+        Ac = A.tocsc()
+        cs, ce = Ac.indptr[k], Ac.indptr[k+1]
+        rows = Ac.indices[cs:ce]
+        mask = rows != k
+        Ac.data[cs:ce][mask] = 0.0
+        A = Ac.tocsr()
+
+    return A, b
+
+def anchor_pressure_exact_many(A_csr, b, idx, values=None, keep_spd=True):
+    """Exact Dirichlet at many DOFs (one CSC pass)."""
+    A = A_csr.tocsr(copy=True)
+    idx = np.atleast_1d(idx).astype(int)
+    vals = (np.zeros_like(idx, dtype=float) if values is None
+            else (np.full_like(idx, float(values)) if np.isscalar(values)
+                  else np.asarray(values, float)))
+    assert vals.shape == idx.shape
+
+    # zero rows + set diagonals + set rhs
+    for k, val in zip(idx, vals):
+        rs, re = A.indptr[k], A.indptr[k+1]
+        A.data[rs:re] = 0.0
+        cols = A.indices[rs:re]
+        hit = np.where(cols == k)[0]
+        if hit.size:
+            A.data[rs + hit[0]] = 1.0
+        else:
+            A += sparse.csr_matrix(([1.0], ([k], [k])), shape=A.shape)
+        b[k] = val
+
+    if keep_spd:
+        Ac = A.tocsc()
+        for k in idx:
+            cs, ce = Ac.indptr[k], Ac.indptr[k+1]
+            rows = Ac.indices[cs:ce]
+            mask = rows != k
+            Ac.data[cs:ce][mask] = 0.0
+        A = Ac.tocsr()
+
+    return A, b
+
+def apply_atmospheric_on_polyline_eta(A_csr, b, grid, eta, patm=0.0, masks=None):
+    """
+    Anchor p = patm along the free surface polyline z = eta(r).
+    For each radial column i, we anchor the cell center just BELOW eta[i].
+    If masks.solid_cell is provided, we step downward until we hit a fluid cell.
+
+    Parameters
+    ----------
+    A_csr : scipy.sparse.csr_matrix
+        Pressure Poisson matrix (CSR).
+    b : ndarray (Nr*Nz,)
+        RHS vector (Fortran ordering).
+    grid : object with r_c, z_c, r_edges, z_edges, Nr, Nz
+    eta : ndarray (Nr,)
+        Free-surface height at r_c.
+    patm : float
+        Atmospheric pressure value to impose.
+    masks : dict or None
+        If provided, use masks['solid_cell'] (Nr,Nz) to avoid solid cells.
+
+    Returns
+    -------
+    A_new, b_new : CSR matrix, ndarray
+        Matrix/vector with Dirichlet anchors applied.
+    """
+    Nr, Nz = grid.Nr, grid.Nz
+    z_edges = grid.z_edges
+
+    solid = masks.get("solid_cell", None) if masks is not None else None
+
+    # for each column i, find j_top below eta[i]
+    j_top = np.searchsorted(z_edges, eta, side='right') - 1
+    j_top = np.clip(j_top, 0, Nz-1)
+
+    # if that cell is solid, step downward until fluid (or give up)
+    if solid is not None:
+        for i in range(Nr):
+            j = j_top[i]
+            while j >= 0 and solid[i, j]:
+                j -= 1
+            j_top[i] = max(j, 0)
+
+    # build list of DOF indices to anchor
+    idx = np.array([_p_dof_index(i, j_top[i], Nr) for i in range(Nr)], dtype=int)
+    vals = np.full_like(idx, float(patm), dtype=float)
+
+    A_new, b_new = anchor_pressure_exact_many(A_csr, b, idx, values=vals, keep_spd=True)
+    return A_new, b_new
+    
+
 def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
-                       rho=1000.0, mu=0.0, g=9.81,
+                       rho=1000.0, mu=0.0, g=9.81, eta0=None,
                        dt=0.01, max_iter=500, alpha_p=0.3,
                        tol_div=1e-8, verbose=True,
                        bc: Dict[str, Dict[str, Tuple[str, Profile]]] | None = None,
-                       u_t_init: Array | None = None):
+                       u_t_init: Array | None = None,
+                       plot_freq = 0, dump_freq = 0, run_label = '', showWall=True,
+                       ):
     """SIMPLE loop with u_theta transport. Returns fields and history."""
     if bc is None: bc = {}
     grid = build_grid(Nr, Nz, R, Zmin, Zmax)
     dr = grid.dr.mean(); dz = grid.dz.mean()
     nu = mu / rho if mu>0 else 0.0
+    print(" mu = ", mu)
+    print(" nu = ", nu)
 
+    # BACK TO THE PAST
+    # masks = build_slanted_wall_masks(grid, R, z_min=0.0, z_max=4.0)
+    solid_cell = np.zeros((Nr, Nz), dtype=bool)
+    solid_cell[:,:] = False
+    face_open_z = np.ones((Nr, Nz+1), dtype=bool)
+    face_open_r = np.ones((Nr+1, Nz), dtype=bool)
+    masks = {
+        "solid_cell": solid_cell,
+        "face_open_r": face_open_r, "face_open_z": face_open_z,
+    }
+
+    # free-surface needs an initial guess
+    if eta0 is None:
+        eta = np.full(Nr, H) # guess flat and go for it
+    else:
+        eta = eta0.copy()
+        
     # Fields
     p = np.zeros((Nr, Nz))
     u_r = np.zeros((Nr+1, Nz))
@@ -409,17 +531,199 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
 
         # --- NEW: add centrifugal acceleration from swirl on radial faces ---
         # face radii r_f = r_edges[1:-1] for interior faces
-        r_f = grid.r_edges[1:-1]                   # shape (Nr-1,)
+        r_f = grid.r_edges                   # shape (Nr+1,)
         # interpolate u_theta from centers to the two cells adjacent to each radial face
         # then average to the face; result shape (Nr-1, Nz)
         u_t_left  = u_t[:-1, :]                    # (Nr-1, Nz)
         u_t_right = u_t[1:,  :]                    # (Nr-1, Nz)
-        u_t_face  = 0.5*(u_t_left + u_t_right)
+        u_t_face  = 0.5*(u_t_left + u_t_right)     # (Nr-1, Nz) centered on interior faces
         # a_c = u_theta^2 / r at the face
-        a_c = (u_t_face**2) / r_f[:, None]         # broadcast r_f along z
+        a_c = np.zeros_like(u_r_star)
+        a_c[1:-1,:] = (u_t_face**2) / r_f[1:-1, None]     # broadcast r_f along z
+        # apply mask to hide centrifugal force in the walled off portion
+        # a_c *= masks['face_open_r'].astype(float) # BACK TO THE PAST
         # apply to interior radial faces; boundaries remain whatever BCs enforce
-        u_r_star[1:-1, :] += dt * a_c
-        # --- end NEW ---
+        u_r_star += dt * a_c
+        
+        if nu > 0.0:
+            u_r_star += dt * nu * laplacian_faces(u_r, dr, dz, orient='r')
+            u_z_star += dt * nu * laplacian_faces(u_z, dr, dz, orient='z')
+
+        # Apply boundary normal velocities
+        apply_boundary_normal_segmented(u_r_star, u_z_star, grid, bc)
+
+        # BACK TO THE PAST
+        u_bottom = None
+        # # set up BC's from injector and drain
+        # Q_in = integrate_wall_inflow_rR(bc, grid)
+        # u_bottom = make_bottom_drain_profile_auto(bc, grid, Q_in)
+        # if u_bottom is not None:
+        #     u_z_star[:, 0] = u_bottom     # impose predictor normal velocity at bottom
+
+
+        # BACK TO THE PAST
+        # # NEW: enforce internal slanted wall (no penetration + u_theta no-slip)
+        # apply_internal_wall_bc(u_r_star, u_z_star, u_t, grid, masks)
+
+        # BACK TO THE PAST
+        # # build pressure-correction Poisson RHS with segmented Neumann terms
+        # b = poisson_rhs_with_bc_segmented_masked(grid, u_r_star, u_z_star, dt, rho, bc,
+        #                                          masks, u_bottom=u_bottom,
+        #                                          rhs_builder_no_mask=poisson_rhs_with_bc_segmented)
+
+        div_u = divergence_from_face_fluxes(u_r_star, u_z_star, grid) # BACK TO THE PAST
+        b = -div_u.ravel(order='F')/dt
+
+        # BACK TO THE PAST
+        # get liquid-air interface by solving for eta(r)
+        # A_p, b_p = apply_atmospheric_on_polyline_eta(Ap.copy(), b.copy(), grid, eta, patm=1e5, masks=masks)
+        # solve Poisson eqn for P'
+        # p_prime = spsolve(A_p, b_p).reshape((Nr, Nz), order='F')
+
+        # BACK TO THE PAST
+        # Solve Poisson
+        Ap_anch, b_anch = anchor_pressure(Ap.copy(), b.copy(), k=0)
+        p_prime = spsolve(Ap_anch, b_anch).reshape((Nr, Nz), order='F')
+
+        # Update pressure and correct velocities with p_prime
+        oldP = p.copy()
+        p += alpha_p * p_prime
+        dpdr_p, dpdz_p = grad_p_on_faces(p_prime, grid)
+        u_r = u_r_star - (dt/rho) * dpdr_p
+        u_z = u_z_star - (dt/rho) * dpdz_p
+
+        # Re-enforce boundary normals
+        apply_boundary_normal_segmented(u_r, u_z, grid, bc)
+
+        # Update u_theta explicitly with current (u_r,u_z)
+        # u_t_old = u_t.copy()
+        u_t = _update_utheta(u_t, u_r, u_z, grid, nu, dt, bc)
+        # print("max ut change = ", np.max(np.abs(u_t - u_t_old)))
+
+        # Diagnostics
+        # BACK TO THE PAST
+        # div_u = divergence_from_face_fluxes_masked(u_r, u_z, grid, masks)
+        div_u = divergence_from_face_fluxes(u_r, u_z, grid) # BACK TO THE PAST
+        max_div = np.max(np.abs(div_u))
+        pc = p_prime.copy()
+        pc -= pc.mean()
+        res_p = np.max(np.abs(pc))
+        # residual for dp/dr, dp/dz correctness
+        dpdr_c = 0.5*(dpdr[:-1,:] + dpdr[1:,:])
+        dpdz_c = 0.5*(dpdz[:, :-1] + dpdz[:, 1:])
+        Rr = dpdr_c - rho*(u_t**2)/np.maximum(grid.r_c[:,None], 1e-12)
+        Rz = dpdz_c + rho*g
+        res_mom = max(np.abs(Rr).max(), np.abs(Rz).max())
+
+        # Track u_t change (Linf)
+        # hist_ut = np.max(np.abs(_update_utheta(u_t, u_r, u_z, grid, nu, 0.0, bc) - u_t))  # zero dt -> just BC reapply
+        # history.append((it, max_div, res_p, hist_ut))
+
+        # update the surface
+        # IN THIS BACK TO THE PAST VERSION THIS ETA HAS NO EFFECT ON
+        # ANYTHING except plots
+        eta, eta_residual = kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.4)
+
+        if verbose and (it % 1000 == 0 or it == 1):
+            # print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
+            # print("eta_residual = ", eta_residual)
+            print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} res_mom={res_mom:.3e} eta_res={np.sum(eta_residual):.3e}")
+
+        if (it % plot_freq == 0 or it == 1):
+            # -------------------
+            # Plot: pressure colormap + u_theta contours
+            # -------------------
+            # BACK TO THE PAST
+            # adjust to keep mass conservation
+            V_target = np.pi * (grid.R**2) * H          # your known fill volume
+            c = choose_pressure_offset_for_volume(p, grid, V_target, masks, patm=0.0)
+            p += c # now the P=0 contour will contain our mass
+            plot_pressure_contours(p, grid,
+                                   title='injected fluid: pressure contours %6d iters' % (it),
+                                   unit='bar', scale=1e5, n_contours=10,
+                                   filename="%s_Pcontours_%06d.png"%(run_label,it), show=False,
+                                   eta=eta, showWall=showWall)
+            
+            plot_streamlines(u_r, u_z, grid, density=1.5,
+                             title='Streamlines (u_r, u_z) %6d iters' % (it),
+                             filename="%s_streamlines_%06d.png"%(run_label,it), show=False,
+                             eta=eta, showWall=showWall,)
+            
+            plot_pressure_with_swirl(p, u_t, grid,
+                                     title='u_theta(r,z) %6d iters' % (it),
+                                     unit='m/s', scale=1.0, show_contours=False,
+                                     filename="%s_u_theta_%06d.png"%(run_label,it),
+                                     eta=eta, show=False, showWall=showWall)
+            
+        # if max_div < tol_div and res_p < 1e-8:
+        if max_div < tol_div and res_p < 1 and res_mom < 1e-6 * rho * g:
+            if verbose:
+                print(f"Converged (continuity & pressure) at iter {it}: max(div u)={max_div:.3e}")
+            break
+
+    # print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e} eta_res={eta_residual:.3e}")
+    print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} res_mom={res_mom:.3e} eta_res={np.sum(eta_residual):.3e}")
+
+
+    return {'p': p, 'u_r': u_r, 'u_z': u_z, 'u_t': u_t, 'grid': grid,
+            'history': history, 'eta': eta}
+
+def NEW_simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
+                       rho=1000.0, mu=0.0, g=9.81, eta0=None,
+                       dt=0.01, max_iter=500, alpha_p=0.3,
+                       tol_div=1e-8, verbose=True,
+                       bc: Dict[str, Dict[str, Tuple[str, Profile]]] | None = None,
+                       u_t_init: Array | None = None,
+                       plot_freq = 0, dump_freq = 0, run_label = '', showWall=True,
+                       ):
+    """SIMPLE loop with u_theta transport. Returns fields and history."""
+    if bc is None: bc = {}
+    grid = build_grid(Nr, Nz, R, Zmin, Zmax)
+    dr = grid.dr.mean(); dz = grid.dz.mean()
+    nu = mu / rho if mu>0 else 0.0
+    masks = build_slanted_wall_masks(grid, R, z_min=0.0, z_max=4.0)
+
+    # free-surface needs an initial guess
+    if eta0 is None:
+        eta = np.full(Nr, H) # guess flat and go for it
+    else:
+        eta = eta0.copy()
+        
+    # Fields
+    p = np.zeros((Nr, Nz))
+    u_r = np.zeros((Nr+1, Nz))
+    u_z = np.zeros((Nr,   Nz+1))
+    u_t = np.zeros((Nr, Nz)) if u_t_init is None else u_t_init.copy()
+
+    # Apply initial u_t BCs
+    apply_ut_boundary_segmented(u_t, grid, bc)
+
+    # Poisson operator (constant ρ)
+    Ap = assemble_poisson_matrix(grid, rho)
+
+    history = []
+    for it in range(1, max_iter+1):
+
+        # Predictor for meridional velocities
+        dpdr, dpdz = grad_p_on_faces(p, grid)
+        u_r_star = u_r - (dt/rho)*dpdr
+        u_z_star = u_z - (dt/rho)*dpdz - dt*g
+
+        # --- NEW: add centrifugal acceleration from swirl on radial faces ---
+        # face radii r_f = r_edges[1:-1] for interior faces
+        r_f = grid.r_edges                   # shape (Nr+1,)
+        # interpolate u_theta from centers to the two cells adjacent to each radial face
+        # then average to the face; result shape (Nr-1, Nz)
+        u_t_left  = u_t[:-1, :]                    # (Nr-1, Nz)
+        u_t_right = u_t[1:,  :]                    # (Nr-1, Nz)
+        u_t_face  = 0.5*(u_t_left + u_t_right)     # (Nr-1, Nz) centered on interior faces
+        # a_c = u_theta^2 / r at the face
+        a_c = np.zeros_like(u_r_star)
+        a_c[1:-1,:] = (u_t_face**2) / r_f[1:-1, None]     # broadcast r_f along z
+        # apply mask to hide centrifugal force in the walled off portion
+        a_c *= masks['face_open_r'].astype(float)
+        # apply to interior radial faces; boundaries remain whatever BCs enforce
+        u_r_star += dt * a_c
         
         if nu > 0.0:
             u_r_star += dt * nu * laplacian_faces(u_r, dr, dz, orient='r')
@@ -434,15 +738,23 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         if u_bottom is not None:
             u_z_star[:, 0] = u_bottom     # impose predictor normal velocity at bottom
 
-        # # Pressure-correction Poisson RHS
-        # b = _poisson_rhs_with_bc(grid, u_r_star, u_z_star, dt, rho, bc)
+
+        # NEW: enforce internal slanted wall (no penetration + u_theta no-slip)
+        apply_internal_wall_bc(u_r_star, u_z_star, u_t, grid, masks)
         
-        # build Poisson RHS with segmented Neumann terms
-        b = poisson_rhs_with_bc_segmented(grid, u_r_star, u_z_star, dt, rho, bc)
-        
-        # Solve Poisson
-        Ap_anch, b_anch = anchor_pressure(Ap.copy(), b.copy(), idx=0)
-        p_prime = spsolve(Ap_anch, b_anch).reshape((Nr, Nz), order='F')
+        # build pressure-correction Poisson RHS with segmented Neumann terms
+        b = poisson_rhs_with_bc_segmented_masked(grid, u_r_star, u_z_star, dt, rho, bc,
+                                                 masks, u_bottom=u_bottom,
+                                                 rhs_builder_no_mask=poisson_rhs_with_bc_segmented)
+
+        # get liquid-air interface by solving for eta(r)
+        A_p, b_p = apply_atmospheric_on_polyline_eta(Ap.copy(), b.copy(), grid, eta, patm=1e5, masks=masks)
+        # solve Poisson eqn for P'
+        p_prime = spsolve(A_p, b_p).reshape((Nr, Nz), order='F')
+
+        # # Solve Poisson
+        # Ap_anch, b_anch = anchor_pressure(Ap.copy(), b.copy(), k=0)
+        # p_prime = spsolve(Ap_anch, b_anch).reshape((Nr, Nz), order='F')
 
         # Update pressure and correct velocities with p_prime
         oldP = p.copy()
@@ -458,148 +770,60 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         u_t = _update_utheta(u_t, u_r, u_z, grid, nu, dt, bc)
 
         # Diagnostics
-        div_u = divergence_from_face_fluxes(u_r, u_z, grid)
+        div_u = divergence_from_face_fluxes_masked(u_r, u_z, grid, masks)
         max_div = np.max(np.abs(div_u))
         res_p = np.max(np.abs(p-oldP))
         # Track u_t change (Linf)
         hist_ut = np.max(np.abs(_update_utheta(u_t, u_r, u_z, grid, nu, 0.0, bc) - u_t))  # zero dt -> just BC reapply
         history.append((it, max_div, res_p, hist_ut))
 
+        # update the surface
+        eta, eta_residual = kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.4)
+
         if verbose and (it % 1000 == 0 or it == 1):
-            print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
+            # print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
+            print("eta_residual = ", eta_residual)
+            print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} eta_res={np.sum(eta_residual):.3e}")
 
-        # if (it % 20000 == 0 or it == 1):
-        #     # -------------------
-        #     # Plot: pressure colormap + u_theta contours
-        #     # -------------------
-        #     # adjust to keep mass conservation
-        #     V_target = np.pi * (grid.R**2) * H          # your known fill volume
-        #     c = choose_pressure_offset_for_volume(p, grid, V_target, patm=0.0)
-        #     p += c # now the P=0 contour will contain our mass
-        #     plot_pressure_contours(p, grid,
-        #                            title='Rotating bucket: pressure contours %d iters' % (it),
-        #                            unit='bar', scale=1e5, n_contours=10)
+        if (it % plot_freq == 0 or it == 1):
+            # -------------------
+            # Plot: pressure colormap + u_theta contours
+            # -------------------
+            # adjust to keep mass conservation
+            # V_target = np.pi * (grid.R**2) * H          # your known fill volume
+            # c = choose_pressure_offset_for_volume(p, grid, V_target,
+            #                                       masks, patm=0.0)
+            # p += c # now the P=0 contour will contain our mass
+            plot_pressure_contours(p, grid,
+                                   title='injected fluid: pressure contours %6d iters' % (it),
+                                   unit='bar', scale=1e5, n_contours=10,
+                                   filename="%s_Pcontours_%06d.png"%(run_label,it), show=False,
+                                   eta=eta, showWall=showWall)
             
-
+            plot_streamlines(u_r, u_z, grid, density=1.5,
+                             title='Streamlines (u_r, u_z) %6d iters' % (it),
+                             filename="%s_streamlines_%06d.png"%(run_label,it), show=False,
+                             eta=eta, showWall=showWall,)
+            
+            plot_pressure_with_swirl(p, u_t, grid,
+                                     title='u_theta(r,z) %6d iters' % (it),
+                                     unit='m/s', scale=1.0, show_contours=False,
+                                     filename="%s_u_theta_%06d.png"%(run_label,it),
+                                     eta=eta, show=False, showWall=showWall)
+            
         # if max_div < tol_div and res_p < 1e-8:
         if max_div < tol_div and res_p < 1:
             if verbose:
                 print(f"Converged (continuity & pressure) at iter {it}: max(div u)={max_div:.3e}")
             break
 
-    print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
+    # print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e} eta_res={eta_residual:.3e}")
+    print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} eta_res={np.sum(eta_residual):.3e}")
 
-    return {'p': p, 'u_r': u_r, 'u_z': u_z, 'u_t': u_t, 'grid': grid, 'history': history}
+    return {'p': p, 'u_r': u_r, 'u_z': u_z, 'u_t': u_t, 'grid': grid,
+            'history': history, 'eta': eta}
 
 import matplotlib.pyplot as plt
-import numpy as np
-
-def _cell_center_velocities(u_r, u_z, grid):
-    '''Compute cell-centered (u_r,u_z) by averaging adjacent face values.'''
-    Nr, Nz = grid.Nr, grid.Nz
-    ur_c = 0.5*(u_r[0:Nr, :] + u_r[1:Nr+1, :])      # average in r
-    uz_c = 0.5*(u_z[:, 0:Nz] + u_z[:, 1:Nz+1])      # average in z
-    return ur_c, uz_c
-
-def plot_pressure_contours(p, grid, title=None, unit='Pa', scale=1.0, n_contours=16):
-    '''Pressure contours on (r,z) grid.'''
-    Nr, Nz = p.shape
-    r_edges, z_edges = grid.r_edges, grid.z_edges
-    r_c, z_c = grid.r_c, grid.z_c
-
-    plt.figure(figsize=(7,5))
-    pm = plt.pcolormesh(r_edges, z_edges, (p.T)/scale, shading='auto')
-    cbar = plt.colorbar(pm); cbar.set_label(f'Pressure [{unit}]')
-    plt.xlabel('r (m)'); plt.ylabel('z (m)')
-    CS = plt.contour(r_c, z_c, (p.T)/scale, levels=n_contours, colors='white')
-    plt.clabel(CS, inline=True, fontsize=10)
-    if title: plt.title(title)
-    plt.tight_layout()
-    plt.show()
-
-def plot_pressure_with_swirl(p, u_t, grid, title=None, unit='Pa', scale=1.0, show_contours=True, n_contours=16):
-    '''Pressure colormap on (r,z) with optional u_theta contours on cell centers.'''
-    Nr, Nz = p.shape
-    r_edges, z_edges = grid.r_edges, grid.z_edges
-    r_c, z_c = grid.r_c, grid.z_c
-
-    plt.figure(figsize=(7,5))
-    pm = plt.pcolormesh(r_edges, z_edges, (p.T)/scale, shading='auto')
-    cbar = plt.colorbar(pm); cbar.set_label(f'Pressure [{unit}]')
-    plt.xlabel('r (m)'); plt.ylabel('z (m)')
-    if show_contours:
-        # Contour u_theta on centers
-        CS = plt.contour(r_c, z_c, u_t.T, levels=n_contours)
-        plt.clabel(CS, inline=True, fontsize=8)
-    if title: plt.title(title)
-    plt.tight_layout()
-    plt.show()
-
-def plot_streamlines(u_r, u_z, grid, density=1.5, title='Streamlines (u_r, u_z)'):
-    '''Streamlines of the meridional velocity field on cell centers.'''
-    r_c, z_c = grid.r_c, grid.z_c
-    ur_c, uz_c = _cell_center_velocities(u_r, u_z, grid)
-
-    plt.figure(figsize=(7,5))
-    # streamplot expects arrays in (x,y) order; our center fields are (Nr,Nz) corresponding to (r,z)
-    plt.streamplot(r_c, z_c, ur_c.T, uz_c.T, density=density)
-    plt.xlabel('r (m)'); plt.ylabel('z (m)')
-    plt.title(title)
-    plt.tight_layout()
-    plt.show()
-
-import numpy as np
-
-def volume_from_pressure_isobar(p, grid, patm=0.0, offset=0.0):
-    # Extract z_fs for p+offset = patm
-    r_c, z_c = grid.r_c, grid.z_c
-    Nr, Nz = p.shape
-    z_fs = np.zeros(Nr)
-    for i in range(Nr):
-        col = p[i,:] + offset - patm
-        # default: surface at top if top cell >= 0
-        if col[-1] >= 0:
-            z_fs[i] = grid.z_edges[-1]
-            # print("   col[-1] = %12.5e"%col[-1],": i = ", i, "z_fs[i]= ",z_fs[i])
-            continue
-        # find first sign change from top down
-        found = False
-        for j in range(Nz-1, 0, -1):
-            if (col[j] <= 0 < col[j-1]) or (col[j] < 0 <= col[j-1]):
-                z1, z0 = z_c[j], z_c[j-1]
-                p1, p0 = col[j], col[j-1]
-                t = 0.0 if p1==p0 else (-p0)/(p1-p0)
-                z_fs[i] = np.clip(z0 + t*(z1-z0), grid.z_edges[0], grid.z_edges[-1])
-                found = True
-                break
-        if not found:
-            # whole column positive → surface below bottom (empty column): set to bottom
-            z_fs[i] = grid.z_edges[0]
-        # print("   Found=",found, " i = ", i, "z_fs[i]= ",z_fs[i])
-    # Axisymmetric volume: 2π ∫ r z(r) dr  ≈ 2π Σ r_c z_fs Δr
-    dr = grid.r_edges[1:] - grid.r_edges[:-1]
-    return 2*np.pi * np.sum(r_c * z_fs * dr)
-
-def choose_pressure_offset_for_volume(p, grid, V_target, patm=0.0, c_lo=-1e7, c_hi=+1e7, tol=1e-6):
-    # Bisection on offset c so that volume_from_pressure_isobar(p,grid,patm,c)=V_target
-    f_lo = volume_from_pressure_isobar(p, grid, patm, c_lo) - V_target
-    f_hi = volume_from_pressure_isobar(p, grid, patm, c_hi) - V_target
-    if f_lo * f_hi > 0:
-        # fallback: return zero shift if not bracketed
-        return 0.0
-    for _ in range(60):
-        c_mid = 0.5*(c_lo + c_hi)
-        f_mid = volume_from_pressure_isobar(p, grid, patm, c_mid) - V_target
-        # print(f"{_:3d} f_mid volume = {f_mid:.3e}" )
-        # print(" c_mid = ", c_mid)
-        # print(" volume_from_pressure_isobar(p,grid,patm,c_mid) = ", volume_from_pressure_isobar(p,grid,patm,c_mid))
-        if abs(f_mid) <= max(1.0, abs(V_target))*tol:
-            return c_mid
-        if f_lo * f_mid <= 0:
-            c_hi, f_hi = c_mid, f_mid
-        else:
-            c_lo, f_lo = c_mid, f_mid
-    return 0.5*(c_lo + c_hi)
     
 if __name__ == "__main__":
     # Demo: rotating outer wall (Ω) with no inlet/outlet; swirl diffuses inward; hydrostatic in z.

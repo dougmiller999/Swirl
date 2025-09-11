@@ -27,6 +27,10 @@ class Grid:
     dz_n : Array 
     dz_s : Array 
     inv_r2 : Array
+    wall_rmin : float
+    wall_zmin : float
+    wall_rmax : float
+    wall_zmax : float
 
 def build_grid(Nr: int, Nz: int, R: float, Zmin: float, Zmax: float) -> Grid:
     r_edges = np.linspace(0.0, R, Nr+1)
@@ -51,8 +55,13 @@ def build_grid(Nr: int, Nz: int, R: float, Zmin: float, Zmax: float) -> Grid:
     inv_r2 = np.zeros((Nr,1))
     mask = (r_c > 0.0)
     inv_r2[mask,0] = 1.0 / (r_c[mask] ** 2)
+    wall_rmin = 1.5
+    wall_zmin = 0.0
+    wall_rmax = R
+    wall_zmax = 4.0
     return Grid(Nr, Nz, R, Zmin, Zmax, r_edges, z_edges, r_c, z_c, dr, dz, A_e, A_w, A_n, A_s, V,
-                dr_e, dr_w, dz_n, dz_s, inv_r2)
+                dr_e, dr_w, dz_n, dz_s, inv_r2,
+                wall_rmin, wall_zmin, wall_rmax, wall_zmax, )
 
 def assemble_poisson_matrix(grid: Grid, rho: float) -> csr_matrix:
     Nr, Nz = grid.Nr, grid.Nz
@@ -109,13 +118,31 @@ def correct_face_velocities(u_r_star: Array, u_z_star: Array, p: Array,
             u_z_new[i, j_face] = u_z_star[i, j_face] - (dt / rho) * dpdz
     return u_r_new, u_z_new
 
-def anchor_pressure(Ap: csr_matrix, b: np.ndarray, idx: int = 0):
+def anchor_pressure(Ap: csr_matrix, b: np.ndarray, k: int = 0):
     Ap = Ap.tolil()
-    Ap.rows[idx] = [idx]
-    Ap.data[idx] = [1.0]
+    Ap.rows[k] = [k]
+    Ap.data[k] = [1.0]
     Ap = Ap.tocsr()
-    b[idx] = 0.0
+    b[k] = 0.0
     return Ap, b
+
+# def anchor_pressure(A_csr, b, k=0, value=0.0, beta=None):
+#     """
+#     Softly enforce p_k ≈ value by adding beta to diag and beta*value to rhs.
+#     No format conversion; very fast. Error is O(1/beta).
+#     """
+#     A = A_csr.tocsr(copy=True)
+#     if beta is None:
+#         # choose beta relative to matrix scale
+#         # e.g., 1e6 times mean diagonal (tweak as needed)
+#         d = A.diagonal()
+#         beta = 1e6 * (np.mean(d) if d.size else 1.0)
+
+#     # add beta on (k,k)
+#     A[k, k] = A[k, k] + beta    # CSR allows this without structural change if diag exists
+#     b[k] = b[k] + beta * value
+#     return A, b
+
 
 if __name__ == '__main__':
     import matplotlib.pyplot as plt

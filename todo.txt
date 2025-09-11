@@ -1,16 +1,16 @@
 PRIORITIES LIST
 -----------------
-[] inflowing wall and a drain on the bottom,
-[] top boundary to limit how high the fluid climbs
-[] restart capability, which is also a way to put in an approximate
-   guess to start with (cut way down on iterations needed).
 [] angled walls so we can try a funnel
 [] some way to test all that for correctness.
+[] restart capability, which is also a way to put in an approximate
+   guess to start with (cut way down on iterations needed).
 [] convergence study 
 [] Convert to Jax
 [] Make it go in parallel!
 -----------------
 DONE
+[25/09/05] inflowing wall and a drain on the bottom,
+[25/09/05] top boundary to limit how high the fluid climbs
 [25/09/05] added profiling, vectorized slow routines, about 7x speedup.
 [25/09/05] successfully run rotating bucket, slow omega (floor covered)
 [25/09/04] successfully run rotating bucket, fast omega (air core)
@@ -18,10 +18,19 @@ DONE
 [25/09/03] use Poisson pressure projection to solve N-S incompressible
            (P,ur,ut,uz) system in Python.
 
-## Where we are today, FRI September  5, 2025 (we are 4 days in).
+## Where we
+
+--FRI September  5, 2025 (we are 4 days in).
+
 We have a 2DRZ steady state incompressible Navier-Stokes solver that
 is producing results that compare well on solid-body-rotation analytic
 solutions for the "rotating bucket" problem at two different rotation
 speeds (one high enough to produce an air core in the middle, one low
 enough that the floor of the bucket is covered with liquid).  
 
+--MON September  8, 2025
+
+Friday was very productive!  We got injectors working, the drain,
+upper BC, and profiled for a 7x'ish speedup overall.
+
+Let's try implementing angled walls.
