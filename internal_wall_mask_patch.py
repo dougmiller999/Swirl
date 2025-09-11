@@ -24,7 +24,8 @@ def r_wall_of_z(R: float, z):
 # ----------------------------
 #  B. Build masks on a grid
 # ----------------------------
-def build_slanted_wall_masks(grid, R: float, z_min=0.0, z_max=4.0):
+def build_slanted_wall_masks(grid, R: float, z_min=0.0, z_max=4.0,
+                             do_wall = True):
     """
     grid must expose:
       r_edges: (Nr+1,), z_edges: (Nz+1,), r_c: (Nr,), z_c: (Nz,)
@@ -36,46 +37,54 @@ def build_slanted_wall_masks(grid, R: float, z_min=0.0, z_max=4.0):
     """
     r_c, z_c = grid.r_c, grid.z_c
     Nr, Nz = r_c.size, z_c.size
-    Rline = grid.r_edges[-1]
+    solid_cell = np.zeros((Nr, Nz), dtype=bool)   # all False
+    face_open_r = np.ones((Nr+1, Nz), dtype=bool) # all True
+    face_open_z = np.ones((Nr, Nz+1), dtype=bool) # all True
 
-    # Where the wall is active in z
-    z_active = (z_c >= z_min) & (z_c <= z_max)
-    r_wall = r_wall_of_z(R, z_c)  # (Nz,)
+    if do_wall:
+        
+        # Where the wall is active in z
+        z_active = (z_c >= z_min) & (z_c <= z_max)
+        r_wall = r_wall_of_z(R, z_c)  # (Nz,)
 
-    # Cell is SOLID if its center lies to the "right" of wall (r >= r_wall) within active band
-    solid_cell = np.zeros((Nr, Nz), dtype=bool)
-    for j in range(Nz):
-        if z_active[j]:
-            solid_cell[:, j] = (r_c >= r_wall[j])
-        else:
-            solid_cell[:, j] = False
+        # Cell is SOLID if its center lies to the "right" of wall (r >= r_wall) within active band
+        for j in range(Nz):
+            if z_active[j]:
+                solid_cell[:, j] = (r_c >= r_wall[j])
+            else:
+                solid_cell[:, j] = False
 
-    # ---- Face "open" masks with face shapes ----
-    # cell-centered solid map is 'solid_cell' (Nr, Nz)
-    # radial faces: shape (Nr+1, Nz); interior i=1..Nr-1 is open iff both adjacent cells are fluid
-    face_open_r = np.ones((Nr+1, Nz), dtype=bool)
-    face_open_r[1:Nr, :] = ~(solid_cell[:-1, :] | solid_cell[1:, :])  # interior faces
-    # boundaries (i=0 axis, i=Nr outer) remain True; handled by BCs
+        # ---- Face "open" masks with face shapes ----
+        # cell-centered solid map is 'solid_cell' (Nr, Nz)
+        # radial faces: shape (Nr+1, Nz); interior i=1..Nr-1 is open iff both adjacent cells are fluid
+        face_open_r[1:Nr, :] = ~(solid_cell[:-1, :] | solid_cell[1:, :])  # interior faces
+        # boundaries (i=0 axis, i=Nr outer) remain True; handled by BCs
 
-    # axial faces: shape (Nr, Nz+1); interior j=1..Nz-1 is open iff both adjacent cells are fluid
-    face_open_z = np.ones((Nr, Nz+1), dtype=bool)
-    face_open_z[:, 1:Nz] = ~(solid_cell[:, :-1] | solid_cell[:, 1:])  # interior faces
-    # boundaries (j=0 bottom, j=Nz top) remain True; handled by BCs
+        # axial faces: shape (Nr, Nz+1); interior j=1..Nz-1 is open iff both adjacent cells are fluid
+        face_open_z[:, 1:Nz] = ~(solid_cell[:, :-1] | solid_cell[:, 1:])  # interior faces
+        # boundaries (j=0 bottom, j=Nz top) remain True; handled by BCs
 
-    # Optional cell-centered “open” flags for convenience (not required for faces now)
-    open_e = np.ones((Nr, Nz), dtype=bool); open_w = np.ones((Nr, Nz), dtype=bool)
-    open_n = np.ones((Nr, Nz), dtype=bool); open_s = np.ones((Nr, Nz), dtype=bool)
-    open_e[:-1, :] = ~(solid_cell[:-1, :] | solid_cell[1:, :])
-    open_w[1:,  :] = ~(solid_cell[:-1, :] | solid_cell[1:, :])
-    open_n[:, :-1] = ~(solid_cell[:, :-1] | solid_cell[:, 1:])
-    open_s[:, 1: ] = ~(solid_cell[:, :-1] | solid_cell[:, 1:])
+        # Optional cell-centered “open” flags for convenience (not required for faces now)
+        open_e = np.ones((Nr, Nz), dtype=bool); open_w = np.ones((Nr, Nz), dtype=bool)
+        open_n = np.ones((Nr, Nz), dtype=bool); open_s = np.ones((Nr, Nz), dtype=bool)
+        open_e[:-1, :] = ~(solid_cell[:-1, :] | solid_cell[1:, :])
+        open_w[1:,  :] = ~(solid_cell[:-1, :] | solid_cell[1:, :])
+        open_n[:, :-1] = ~(solid_cell[:, :-1] | solid_cell[:, 1:])
+        open_s[:, 1: ] = ~(solid_cell[:, :-1] | solid_cell[:, 1:])
 
-    masks = {
-        "solid_cell": solid_cell,
-        "face_open_r": face_open_r, "face_open_z": face_open_z,
-        "open_e": open_e, "open_w": open_w, "open_n": open_n, "open_s": open_s,
-        "R_line": Rline,
-    }
+        masks = {
+            "solid_cell": solid_cell,
+            "face_open_r": face_open_r, "face_open_z": face_open_z,
+            "open_e": open_e, "open_w": open_w, # not actually used
+            "open_n": open_n, "open_s": open_s, # not actually used
+            "R_line": grid.r_edges[-1],         # not actually used
+        }
+    else:
+        masks = {
+            "solid_cell": solid_cell,
+            "face_open_r": face_open_r, "face_open_z": face_open_z,
+        }
+        
     return masks
 
 # -------------------------------------------------------

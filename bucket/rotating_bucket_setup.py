@@ -34,7 +34,7 @@ import cProfile
 do_graphics = True
 show = False # show plots during the run in addition to saving them
 show = True # show plots during the run in addition to saving them
-plot_freq = 10000
+plot_freq = 200
 
 # -------------------
 # Problem parameters
@@ -70,7 +70,7 @@ dt = 0.0004              # s (keep CFL = u*dt/dr <= ~0.5; here u ~ ΩR ≈ 31.4 
 dt = 0.001 # cheating
 max_iter = 1000000          # SIMPLE iterations
 max_iter = 10         # SIMPLE iterations
-max_iter = 1000         # SIMPLE iterations
+max_iter = 200        # SIMPLE iterations
 alpha_p = 0.7           # pressure under-relaxation
 tol_div = 1e-8
 
@@ -109,8 +109,11 @@ out = simple_solve_swirl(Nr=Nr, Nz=Nz, R=R, H=H, Zmin=0.0, Zmax=Zmax,
                          rho=rho, mu=mu, g=g, eta0=None,
                          dt=dt, max_iter=max_iter, alpha_p=alpha_p, tol_div=tol_div, verbose=True,
                          bc=bc,
+                         do_wall= False, # no internal walls in basic bucket
+                         do_injector = False, # no injectors for basic bucket
+                         do_drain = False,    # no drain for basic bucket
                          # u_t_init=None,
-                         u_t_init=ut_init,
+                         u_t_init=ut_init,    # approx solution to start
                          plot_freq=plot_freq, dump_freq=0, run_label =
                          run_label, showWall = False)
 

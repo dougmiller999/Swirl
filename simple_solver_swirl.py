@@ -483,25 +483,16 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
                        bc: Dict[str, Dict[str, Tuple[str, Profile]]] | None = None,
                        u_t_init: Array | None = None,
                        plot_freq = 0, dump_freq = 0, run_label = '', showWall=True,
+                       do_wall=True, do_injector=True, do_drain=True,
                        ):
     """SIMPLE loop with u_theta transport. Returns fields and history."""
     if bc is None: bc = {}
     grid = build_grid(Nr, Nz, R, Zmin, Zmax)
     dr = grid.dr.mean(); dz = grid.dz.mean()
     nu = mu / rho if mu>0 else 0.0
-    print(" mu = ", mu)
-    print(" nu = ", nu)
 
-    # BACK TO THE PAST
-    # masks = build_slanted_wall_masks(grid, R, z_min=0.0, z_max=4.0)
-    solid_cell = np.zeros((Nr, Nz), dtype=bool)
-    solid_cell[:,:] = False
-    face_open_z = np.ones((Nr, Nz+1), dtype=bool)
-    face_open_r = np.ones((Nr+1, Nz), dtype=bool)
-    masks = {
-        "solid_cell": solid_cell,
-        "face_open_r": face_open_r, "face_open_z": face_open_z,
-    }
+    masks = build_slanted_wall_masks(grid, R, z_min=0.0, z_max=4.0,
+                                     do_wall = do_wall)
 
     # free-surface needs an initial guess
     if eta0 is None:
@@ -541,7 +532,7 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         a_c = np.zeros_like(u_r_star)
         a_c[1:-1,:] = (u_t_face**2) / r_f[1:-1, None]     # broadcast r_f along z
         # apply mask to hide centrifugal force in the walled off portion
-        # a_c *= masks['face_open_r'].astype(float) # BACK TO THE PAST
+        a_c *= masks['face_open_r'].astype(float)
         # apply to interior radial faces; boundaries remain whatever BCs enforce
         u_r_star += dt * a_c
         
@@ -552,13 +543,15 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         # Apply boundary normal velocities
         apply_boundary_normal_segmented(u_r_star, u_z_star, grid, bc)
 
-        # BACK TO THE PAST
-        u_bottom = None
-        # # set up BC's from injector and drain
-        # Q_in = integrate_wall_inflow_rR(bc, grid)
-        # u_bottom = make_bottom_drain_profile_auto(bc, grid, Q_in)
-        # if u_bottom is not None:
-        #     u_z_star[:, 0] = u_bottom     # impose predictor normal velocity at bottom
+        # set up BC's from injector and drain
+        if do_injector:
+            Q_in = integrate_wall_inflow_rR(bc, grid)
+        if do_drain and do_injector:
+            u_bottom = make_bottom_drain_profile_auto(bc, grid, Q_in)
+        else:
+            u_bottom = None
+        if u_bottom is not None:
+            u_z_star[:, 0] = u_bottom     # impose predictor normal velocity at bottom
 
 
         # BACK TO THE PAST
@@ -611,9 +604,17 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         # residual for dp/dr, dp/dz correctness
         dpdr_c = 0.5*(dpdr[:-1,:] + dpdr[1:,:])
         dpdz_c = 0.5*(dpdz[:, :-1] + dpdz[:, 1:])
+        dpdz_c[:,0] = dpdz_c[:,1]
+        dpdz_c[:,-1] = dpdz_c[:,-2]
         Rr = dpdr_c - rho*(u_t**2)/np.maximum(grid.r_c[:,None], 1e-12)
+        Rr[Nr-1,:] = 0.0 # boundary values don't mean much here
         Rz = dpdz_c + rho*g
+        # print(it, " dpdr_c[-4:-1,0] = ", dpdr_c[-4:,0])
+        # print(it, " dpdr[-4:-1,0] = ", dpdr[-4:,0])
+        # print(it, " rho*(u_t**2)/r[-4:-1,0] = ", rho*(u_t[-4:,0]**2)/grid.r_c[-4:])
         res_mom = max(np.abs(Rr).max(), np.abs(Rz).max())
+        res_mom_r = (np.abs(Rr)).max()
+        res_mom_z = (np.abs(Rz)).max()
 
         # Track u_t change (Linf)
         # hist_ut = np.max(np.abs(_update_utheta(u_t, u_r, u_z, grid, nu, 0.0, bc) - u_t))  # zero dt -> just BC reapply
@@ -627,9 +628,17 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         if verbose and (it % 1000 == 0 or it == 1):
             # print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
             # print("eta_residual = ", eta_residual)
-            print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} res_mom={res_mom:.3e} eta_res={np.sum(eta_residual):.3e}")
+            print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} res_mom_r={res_mom_r:.3e} res_mom_z={res_mom_z:.3e} eta_res={np.sum(eta_residual):.3e}")
 
         if (it % plot_freq == 0 or it == 1):
+
+            # # # diagnostic plot of dpdz = - rho g
+            # plot_pressure_contours(Rr, grid,
+            #                        title='dpdr - ut**2/r contours %6d iters' % (it),
+            #                        unit='Pa/m', scale=1, n_contours=10,
+            #                        filename=None, show=True,
+            #                        eta=eta, showWall=showWall)
+            
             # -------------------
             # Plot: pressure colormap + u_theta contours
             # -------------------
@@ -662,7 +671,7 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
             break
 
     # print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e} eta_res={eta_residual:.3e}")
-    print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} res_mom={res_mom:.3e} eta_res={np.sum(eta_residual):.3e}")
+    print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} res_mom_r={res_mom_r:.3e} res_mom_z={res_mom_z:.3e} eta_res={np.sum(eta_residual):.3e}")
 
 
     return {'p': p, 'u_r': u_r, 'u_z': u_z, 'u_t': u_t, 'grid': grid,
