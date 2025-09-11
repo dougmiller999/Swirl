@@ -554,18 +554,13 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
             u_z_star[:, 0] = u_bottom     # impose predictor normal velocity at bottom
 
 
-        # BACK TO THE PAST
-        # # NEW: enforce internal slanted wall (no penetration + u_theta no-slip)
-        # apply_internal_wall_bc(u_r_star, u_z_star, u_t, grid, masks)
+        # NEW: enforce internal slanted wall (no penetration + u_theta no-slip)
+        apply_internal_wall_bc(u_r_star, u_z_star, u_t, grid, masks)
 
-        # BACK TO THE PAST
-        # # build pressure-correction Poisson RHS with segmented Neumann terms
-        # b = poisson_rhs_with_bc_segmented_masked(grid, u_r_star, u_z_star, dt, rho, bc,
-        #                                          masks, u_bottom=u_bottom,
-        #                                          rhs_builder_no_mask=poisson_rhs_with_bc_segmented)
-
-        div_u = divergence_from_face_fluxes(u_r_star, u_z_star, grid) # BACK TO THE PAST
-        b = -div_u.ravel(order='F')/dt
+        # build pressure-correction Poisson RHS with segmented Neumann terms
+        b = poisson_rhs_with_bc_segmented_masked(grid, u_r_star, u_z_star, dt, rho, bc,
+                                                 masks, u_bottom=u_bottom,
+                                                 rhs_builder_no_mask=poisson_rhs_with_bc_segmented)
 
         # BACK TO THE PAST
         # get liquid-air interface by solving for eta(r)
