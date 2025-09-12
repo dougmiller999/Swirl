@@ -34,7 +34,8 @@ import cProfile
 do_graphics = True
 show = False # show plots during the run in addition to saving them
 show = True # show plots during the run in addition to saving them
-plot_freq = 200
+plot_freq = 2000
+mode = "eta_mode" # "legacy", for controlling liquid-air interface scheme
 
 # -------------------
 # Problem parameters
@@ -66,11 +67,12 @@ else:
 Nr, Nz = 120, 200       # grid resolution (tune as desired)
 Nr, Nz = 2*30, 2*50       # grid resolution (tune as desired)
 Nr, Nz = 30, 50       # grid resolution (tune as desired)
+Nr, Nz = 10, 10       # grid resolution (tune as desired)
 dt = 0.0004              # s (keep CFL = u*dt/dr <= ~0.5; here u ~ ΩR ≈ 31.4 m/s → dr ≈ R/Nr)
 dt = 0.001 # cheating
 max_iter = 1000000          # SIMPLE iterations
 max_iter = 10         # SIMPLE iterations
-max_iter = 200        # SIMPLE iterations
+max_iter = 20        # SIMPLE iterations
 alpha_p = 0.7           # pressure under-relaxation
 tol_div = 1e-8
 
@@ -115,7 +117,8 @@ out = simple_solve_swirl(Nr=Nr, Nz=Nz, R=R, H=H, Zmin=0.0, Zmax=Zmax,
                          # u_t_init=None,
                          u_t_init=ut_init,    # approx solution to start
                          plot_freq=plot_freq, dump_freq=0, run_label =
-                         run_label, showWall = False)
+                         run_label, showWall = False,
+                         mode = mode)
 
 # profiler.disable()
 # profiler.print_stats(sort='cumulative')
@@ -123,24 +126,28 @@ out = simple_solve_swirl(Nr=Nr, Nz=Nz, R=R, H=H, Zmin=0.0, Zmax=Zmax,
 p, u_t, u_r, u_z, grid, eta = out['p'], out['u_t'], out['u_r'],out['u_z'], out['grid'], out['eta']
 
 if do_graphics:
-    # BACK TO THE PAST
-    # adjust to keep mass conservation
-    V_target = np.pi * (grid.R**2) * H          # your known fill volume
-    masks = {'solid_cell' : np.zeros((Nr,Nz),dtype=bool)}
-    c = choose_pressure_offset_for_volume(p, grid, V_target, masks, patm=0.0)
-    p += c # now the P=0 contour will contain our mass
+    if mode == "eta_mode":
+        pass
+    else:
+        # BACK TO THE PAST
+        # adjust to keep mass conservation
+        V_target = np.pi * (grid.R**2) * H          # your known fill volume
+        masks = {'solid_cell' : np.zeros((Nr,Nz),dtype=bool)}
+        c = choose_pressure_offset_for_volume(p, grid, V_target, masks, patm=0.0)
+        p += c # now the P=0 contour will contain our mass
 
-    # actually we know this solution, so let's plot it
-    if run == 'fast':
-        r0 = 2.233
-        r = grid.r_c
-        eta= H/(1-(r0/R)**2) + Omega**2*R**2/(2*g) * ((r/R)**2 - 0.5*(1+(r0/R)**2))
-        eta = np.clip(eta, 0.0, 25.0)
-    elif run == 'slow':
-        r0 = 0.0
-        r = grid.r_c
-        eta= H/(1-(r0/R)**2) + Omega**2*R**2/(2*g) * ((r/R)**2 - 0.5*(1+(r0/R)**2))
-        eta = np.clip(eta, 0.0, 25.0)
+        # actually we know this solution, so let's plot it
+        if run == 'fast':
+            r0 = 2.233
+            r = grid.r_c
+            eta= H/(1-(r0/R)**2) + Omega**2*R**2/(2*g) * ((r/R)**2 - 0.5*(1+(r0/R)**2))
+            eta = np.clip(eta, 0.0, 25.0)
+        elif run == 'slow':
+            r0 = 0.0
+            r = grid.r_c
+            eta= H/(1-(r0/R)**2) + Omega**2*R**2/(2*g) * ((r/R)**2 - 0.5*(1+(r0/R)**2))
+            eta = np.clip(eta, 0.0, 25.0)
+            
     # -------------------
     # Plot: pressure colormap
     # -------------------

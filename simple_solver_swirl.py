@@ -471,6 +471,8 @@ def apply_atmospheric_on_polyline_eta(A_csr, b, grid, eta, patm=0.0, masks=None)
     # build list of DOF indices to anchor
     idx = np.array([_p_dof_index(i, j_top[i], Nr) for i in range(Nr)], dtype=int)
     vals = np.full_like(idx, float(patm), dtype=float)
+    print(" idx = ", idx)
+    print(" vals = ", vals)
 
     A_new, b_new = anchor_pressure_exact_many(A_csr, b, idx, values=vals, keep_spd=True)
     return A_new, b_new
@@ -484,6 +486,8 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
                        u_t_init: Array | None = None,
                        plot_freq = 0, dump_freq = 0, run_label = '', showWall=True,
                        do_wall=True, do_injector=True, do_drain=True,
+                       mode = "eta_mode", print_cycle = 1000,
+                       # mode = "legacy"
                        ):
     """SIMPLE loop with u_theta transport. Returns fields and history."""
     if bc is None: bc = {}
@@ -501,7 +505,8 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         eta = eta0.copy()
         
     # Fields
-    p = np.zeros((Nr, Nz))
+    # p = np.zeros((Nr, Nz))
+    p = 1e5 + rho*g*(H-grid.z_c[None,:]) * np.ones((grid.Nr,1)) # shape (Nr,Nz), gravity to start
     u_r = np.zeros((Nr+1, Nz))
     u_z = np.zeros((Nr,   Nz+1))
     u_t = np.zeros((Nr, Nz)) if u_t_init is None else u_t_init.copy()
@@ -515,10 +520,14 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
     history = []
     for it in range(1, max_iter+1):
 
+        print('eta = ', eta)
+        
         # Predictor for meridional velocities
         dpdr, dpdz = grad_p_on_faces(p, grid)
+        print('dpdz[0]=',dpdz[0]) 
         u_r_star = u_r - (dt/rho)*dpdr
         u_z_star = u_z - (dt/rho)*dpdz - dt*g
+        print('u_z_star[0]=',u_z_star[0]) 
 
         # --- NEW: add centrifugal acceleration from swirl on radial faces ---
         # face radii r_f = r_edges[1:-1] for interior faces
@@ -562,20 +571,29 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
                                                  masks, u_bottom=u_bottom,
                                                  rhs_builder_no_mask=poisson_rhs_with_bc_segmented)
 
-        # BACK TO THE PAST
-        # get liquid-air interface by solving for eta(r)
-        # A_p, b_p = apply_atmospheric_on_polyline_eta(Ap.copy(), b.copy(), grid, eta, patm=1e5, masks=masks)
-        # solve Poisson eqn for P'
-        # p_prime = spsolve(A_p, b_p).reshape((Nr, Nz), order='F')
+        if mode == "eta_mode":
+            # BACK TO THE PAST
+            # get liquid-air interface by solving for eta(r)
+            A_p, b_p = apply_atmospheric_on_polyline_eta(Ap.copy(), b.copy(), grid, eta, patm=1e5, masks=masks)
+            # solve Poisson eqn for P'
+            p_prime = spsolve(A_p, b_p).reshape((Nr, Nz), order='F')
+        elif mode == 'legacy':
+            # BACK TO THE PAST
+            # Solve Poisson
+            Ap_anch, b_anch = anchor_pressure(Ap.copy(), b.copy(), k=0)
+            p_prime = spsolve(Ap_anch, b_anch).reshape((Nr, Nz), order='F')
+        else:
+            raise RuntimeError("mode not set to eta_mode nor legacy")
 
-        # BACK TO THE PAST
-        # Solve Poisson
-        Ap_anch, b_anch = anchor_pressure(Ap.copy(), b.copy(), k=0)
-        p_prime = spsolve(Ap_anch, b_anch).reshape((Nr, Nz), order='F')
 
         # Update pressure and correct velocities with p_prime
         oldP = p.copy()
+        print(" b = ", b)
+        print(" b_p = ", b_p)
+        print(" p[0,:] = ", p[0,:])
+        print(" p_prime[0,:] = ", p_prime[0,:])
         p += alpha_p * p_prime
+        print(" AFTER p[0,:] = ", p[0,:])
         dpdr_p, dpdz_p = grad_p_on_faces(p_prime, grid)
         u_r = u_r_star - (dt/rho) * dpdr_p
         u_z = u_z_star - (dt/rho) * dpdz_p
@@ -616,14 +634,27 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         # history.append((it, max_div, res_p, hist_ut))
 
         # update the surface
-        # IN THIS BACK TO THE PAST VERSION THIS ETA HAS NO EFFECT ON
-        # ANYTHING except plots
-        eta, eta_residual = kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.4)
+        if mode == "eta_mode":
+            if it % 10 == 0 or it == 1:
+                eta, eta_residual = kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.4)
+                # print('BEFORE')
+                # print('u_z[:,-1]=',u_z[:,-1]) 
+                # print('u_z[:,0]=',u_z[:,0])
+                # print(" u_z = ", u_z)
+                # print(" u_r = ", u_r)
+                # eta_test, eta_residual = kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.0)  # NO update
+                print("max|R|=", np.max(np.abs(eta_residual)), "u_r max=", np.max(np.abs(u_r)), "u_z max=", np.max(np.abs(u_z)))
+            
+        elif mode == "legacy":
+            eta = None
+            eta_residual = np.array([0.0, 0.0])
+        else:
+            raise RuntimeError("mode not set to eta_mode nor legacy")
 
-        if verbose and (it % 1000 == 0 or it == 1):
+        if verbose and (it % print_cycle == 0 or it == 1):
             # print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
             # print("eta_residual = ", eta_residual)
-            print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} res_mom_r={res_mom_r:.3e} res_mom_z={res_mom_z:.3e} eta_res={np.sum(eta_residual):.3e}")
+            print(f"Iter {it:4d}: max(div u)={max_div:.3e} res_p={res_p:.3e} res_mom_r={res_mom_r:.3e} res_mom_z={res_mom_z:.3e} eta_res={np.max(eta_residual):.3e}")
 
         if (it % plot_freq == 0 or it == 1):
 
@@ -637,11 +668,12 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
             # -------------------
             # Plot: pressure colormap + u_theta contours
             # -------------------
-            # BACK TO THE PAST
-            # adjust to keep mass conservation
-            V_target = np.pi * (grid.R**2) * H          # your known fill volume
-            c = choose_pressure_offset_for_volume(p, grid, V_target, masks, patm=0.0)
-            p += c # now the P=0 contour will contain our mass
+            if mode == "legacy":
+                # BACK TO THE PAST
+                # adjust to keep mass conservation
+                V_target = np.pi * (grid.R**2) * H          # your known fill volume
+                c = choose_pressure_offset_for_volume(p, grid, V_target, masks, patm=0.0)
+                p += c # now the P=0 contour will contain our mass
             plot_pressure_contours(p, grid,
                                    title='injected fluid: pressure contours %6d iters' % (it),
                                    unit='bar', scale=1e5, n_contours=10,
