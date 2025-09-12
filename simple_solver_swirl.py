@@ -574,7 +574,7 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         if mode == "eta_mode":
             # BACK TO THE PAST
             # get liquid-air interface by solving for eta(r)
-            A_p, b_p = apply_atmospheric_on_polyline_eta(Ap.copy(), b.copy(), grid, eta, patm=1e5, masks=masks)
+            A_p, b_p = apply_atmospheric_on_polyline_eta(Ap.copy(), b.copy(), grid, eta, patm=0.0, masks=masks)
             # solve Poisson eqn for P'
             p_prime = spsolve(A_p, b_p).reshape((Nr, Nz), order='F')
         elif mode == 'legacy':
