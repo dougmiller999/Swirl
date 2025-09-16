@@ -1,6 +1,6 @@
 
 """
-rotating_bucket_setup.py
+rotating_bucket_setup.py  DEBUG 
 
 Sets up a rotating bucket in axisymmetric (r–z) coordinates and solves with SIMPLE + swirl:
 - No-slip walls (side & bottom), open top (no normal flow; zero-grad swirl)
@@ -35,7 +35,7 @@ do_graphics = True
 show = False # show plots during the run in addition to saving them
 show = True # show plots during the run in addition to saving them
 plot_freq = 2000
-print_cycle = 1
+mode = "legacy" #
 mode = "eta_mode" # "legacy", for controlling liquid-air interface scheme
 
 # -------------------
@@ -43,39 +43,30 @@ mode = "eta_mode" # "legacy", for controlling liquid-air interface scheme
 # -------------------
 g    = 9.81  # m/s^2
 rho = 1000.0            # kg/m^3
-mu  = 1.0e-3            # Pa·s # real value
-mu  = 10000.0            # Pa·s # fake value for faster convergence
+mu  = 1.0e-3            # Pa·s
 R   = 3.0               # m
 H   = 5.0               # m (mean height)
 Zmin = 0.0
 
-run = "slow"
+run = "flat"
 
-if run == "fast":
-    # this piles up liquid between 2.23 and R in a sharp near-triangle
-    run_label = 'fast_bucket'
-    rpm = 100.0
-    Omega = rpm * 2.0*np.pi / 60.0   # rad/s
-    Zmax = 25.0 # m, z-range allowed
-else:
-    # changing to one where there is no air cone
-    run_label = 'slow_bucket'
-    Omega = 4.5  # rad/s
-    Zmax = 10.0 # m, z-range allowed
+# changing to one where there is no air cone
+run_label = 'flat_debug'
+Omega = 0.0  # rad/s
+Zmax = 10.0 # m, z-range allowed
 
 # -------------------
 # Numerical settings
 # -------------------
-    
 Nr, Nz = 120, 200       # grid resolution (tune as desired)
 Nr, Nz = 2*30, 2*50       # grid resolution (tune as desired)
-Nr, Nz = 30, 50       # grid resolution (tune as desired)
 Nr, Nz = 10, 10       # grid resolution (tune as desired)
+Nr, Nz = 2, 9       # grid resolution (tune as desired)
 dt = 0.0004              # s (keep CFL = u*dt/dr <= ~0.5; here u ~ ΩR ≈ 31.4 m/s → dr ≈ R/Nr)
 dt = 0.001 # cheating
 max_iter = 1000000          # SIMPLE iterations
-max_iter = 20000        # SIMPLE iterations
-max_iter = 3000         # SIMPLE iterations
+max_iter = 4        # SIMPLE iterations
+print_cycle = 1
 alpha_p = 0.7           # pressure under-relaxation
 tol_div = 1e-8
 
@@ -98,17 +89,17 @@ def ut_bottom_profile(r):
 
 bc = {
     'r=0':    {'u_r': ('wall', 0.0), 'ut': ('dirichlet', 0.0)},
-    'r=R':    {'u_r': ('wall', 0.0), 'ut': ('dirichlet', lambda z: Omega*R*np.ones_like(z))},
-    'z=Zmin': {'u_z': ('wall', 0.0), 'ut': ('dirichlet', ut_bottom_profile)},
+    # 'r=R':    {'u_r': ('wall', 0.0), 'ut': ('dirichlet', lambda z: Omega*R*np.ones_like(z))},
+    'r=R':    {'u_r': ('wall', 0.0), 'ut': ('dirichlet', 0.0)},
+    # 'z=Zmin': {'u_z': ('wall', 0.0), 'ut': ('dirichlet', ut_bottom_profile)},
+    'z=Zmin': {'u_z': ('wall', 0.0), 'ut': ('dirichlet', 0.0)},
     'z=Zmax': {'u_z': ('wall', 0.0), 'ut': ('neumann', 0.0)},
 }
 
 ut_init = np.ones((Nr,Nz), dtype=float)
 grid = build_grid(Nr, Nz, R, Zmin, Zmax)
 for j in range(Nz):
-    ut_init[:,j] = Omega * grid.r_c
-    # let's try realistic "we don't know the answer" initial condition
-    ut_init[:,j] = 0.0 * grid.r_c
+    ut_init[:,j] = 0.0*grid.r_c
 
 # -------------------
 # Solve
@@ -126,7 +117,8 @@ out = simple_solve_swirl(Nr=Nr, Nz=Nz, R=R, H=H, Zmin=0.0, Zmax=Zmax,
                          # u_t_init=None,
                          u_t_init=ut_init,    # approx solution to start
                          plot_freq=plot_freq, dump_freq=0, run_label =
-                         run_label, showWall = False, print_cycle = print_cycle,
+                         run_label, showWall = False,
+                         print_cycle = print_cycle,
                          mode = mode)
 
 # profiler.disable()
@@ -161,8 +153,7 @@ if do_graphics:
     # Plot: pressure colormap
     # -------------------
     plot_pressure_contours(p, grid,
-                           title='Rotating bucket: pressure contours, '
-                           + run_label,
+                           title='Rotating bucket: pressure contours',
                            unit='bar', scale=1e5, n_contours=10,
                            filename="%s_Pcontours.png"%(run_label), show=show,
                            eta=eta, showWall=False)
@@ -171,7 +162,7 @@ if do_graphics:
     # Plot: pressure colormap + u_theta contours
     # -------------------
     plot_pressure_with_swirl(p, u_t, grid,
-                             title=run_label + ': u_theta (colormap)',
+                             title=f'injected fluid: u_theta (colormap)',
                              show_contours=False, n_contours=18,
                              filename="%s_Ut_contours.png"%(run_label), show=show,
                              eta = eta, showWall = False)
@@ -180,7 +171,7 @@ if do_graphics:
     # Plot: meridional streamlines
     # -------------------
     plot_streamlines(u_r, u_z, grid, density=1.3, 
-                     title=run_label + 'Rotating bucket: streamlines',
+                     title=f'Rotating bucket: streamlines',
                      filename="%s_streamlines.png"%(run_label), show=show,
                      eta=eta, showWall=False)
 

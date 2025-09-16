@@ -471,8 +471,8 @@ def apply_atmospheric_on_polyline_eta(A_csr, b, grid, eta, patm=0.0, masks=None)
     # build list of DOF indices to anchor
     idx = np.array([_p_dof_index(i, j_top[i], Nr) for i in range(Nr)], dtype=int)
     vals = np.full_like(idx, float(patm), dtype=float)
-    print(" idx = ", idx)
-    print(" vals = ", vals)
+    # print(" idx = ", idx)
+    # print(" vals = ", vals)
 
     A_new, b_new = anchor_pressure_exact_many(A_csr, b, idx, values=vals, keep_spd=True)
     return A_new, b_new
@@ -520,14 +520,14 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
     history = []
     for it in range(1, max_iter+1):
 
-        print('eta = ', eta)
+        # print('eta = ', eta)
         
         # Predictor for meridional velocities
         dpdr, dpdz = grad_p_on_faces(p, grid)
-        print('dpdz[0]=',dpdz[0]) 
+        # print('dpdz[0]=',dpdz[0]) 
         u_r_star = u_r - (dt/rho)*dpdr
         u_z_star = u_z - (dt/rho)*dpdz - dt*g
-        print('u_z_star[0]=',u_z_star[0]) 
+        # print('u_z_star[0]=',u_z_star[0]) 
 
         # --- NEW: add centrifugal acceleration from swirl on radial faces ---
         # face radii r_f = r_edges[1:-1] for interior faces
@@ -587,13 +587,12 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
 
 
         # Update pressure and correct velocities with p_prime
-        oldP = p.copy()
-        print(" b = ", b)
-        print(" b_p = ", b_p)
-        print(" p[0,:] = ", p[0,:])
-        print(" p_prime[0,:] = ", p_prime[0,:])
+        # print(" b = ", b)
+        # print(" b_p = ", b_p)
+        # print(" p[0,:] = ", p[0,:])
+        # print(" p_prime[0,:] = ", p_prime[0,:])
         p += alpha_p * p_prime
-        print(" AFTER p[0,:] = ", p[0,:])
+        # print(" AFTER p[0,:] = ", p[0,:])
         dpdr_p, dpdz_p = grad_p_on_faces(p_prime, grid)
         u_r = u_r_star - (dt/rho) * dpdr_p
         u_z = u_z_star - (dt/rho) * dpdz_p
@@ -612,7 +611,7 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         div_u = divergence_from_face_fluxes(u_r, u_z, grid) # BACK TO THE PAST
         max_div = np.max(np.abs(div_u))
         pc = p_prime.copy()
-        pc -= pc.mean()
+        pc -= pc.mean()  # shifting P by a constant means nothing
         res_p = np.max(np.abs(pc))
         # residual for dp/dr, dp/dz correctness
         dpdr_c = 0.5*(dpdr[:-1,:] + dpdr[1:,:])
@@ -620,22 +619,30 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
         dpdz_c[:,0] = dpdz_c[:,1]
         dpdz_c[:,-1] = dpdz_c[:,-2]
         Rr = dpdr_c - rho*(u_t**2)/np.maximum(grid.r_c[:,None], 1e-12)
-        Rr[Nr-1,:] = 0.0 # boundary values don't mean much here
+        # Rr[Nr-1,:] = 0.0 # boundary values don't mean much here
         Rz = dpdz_c + rho*g
-        # print(it, " dpdr_c[-4:-1,0] = ", dpdr_c[-4:,0])
-        # print(it, " dpdr[-4:-1,0] = ", dpdr[-4:,0])
-        # print(it, " rho*(u_t**2)/r[-4:-1,0] = ", rho*(u_t[-4:,0]**2)/grid.r_c[-4:])
+        # print(it, " p[-2:-1,-1]      = ", p[-2:,-1])
+        # print(it, " dpdr_c[-2:-1,-1] = ", dpdr_c[-2:,-1])
+        # print(it, " dpdr[-2:-1,-1] = ", dpdr[-2:,-1])
+        # print(it, " rho*(u_t**2)/r[-2:-1,-1] = ", rho*(u_t[-2:,-1]**2)/grid.r_c[-2:])
+        # print(it, " Rr[-2:,-1] = ", Rr[-2:,-1])
         res_mom = max(np.abs(Rr).max(), np.abs(Rz).max())
-        res_mom_r = (np.abs(Rr)).max()
+        res_mom_r = np.max((np.abs(Rr[:,-1])))
         res_mom_z = (np.abs(Rz)).max()
 
         # Track u_t change (Linf)
         # hist_ut = np.max(np.abs(_update_utheta(u_t, u_r, u_z, grid, nu, 0.0, bc) - u_t))  # zero dt -> just BC reapply
         # history.append((it, max_div, res_p, hist_ut))
 
+        if res_p < 1:
+            P_and_u_converged_enough = True
+        else:
+            P_and_u_converged_enough = False
+            
         # update the surface
         if mode == "eta_mode":
-            if it % 10 == 0 or it == 1:
+            if P_and_u_converged_enough:
+                print(it, "updating eta!")
                 eta, eta_residual = kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.4)
                 # print('BEFORE')
                 # print('u_z[:,-1]=',u_z[:,-1]) 
@@ -644,6 +651,8 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
                 # print(" u_r = ", u_r)
                 # eta_test, eta_residual = kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.0)  # NO update
                 print("max|R|=", np.max(np.abs(eta_residual)), "u_r max=", np.max(np.abs(u_r)), "u_z max=", np.max(np.abs(u_z)))
+            else:
+                eta_residual = np.array([0.0, 0.0])
             
         elif mode == "legacy":
             eta = None
@@ -704,160 +713,160 @@ def simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
     return {'p': p, 'u_r': u_r, 'u_z': u_z, 'u_t': u_t, 'grid': grid,
             'history': history, 'eta': eta}
 
-def NEW_simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
-                       rho=1000.0, mu=0.0, g=9.81, eta0=None,
-                       dt=0.01, max_iter=500, alpha_p=0.3,
-                       tol_div=1e-8, verbose=True,
-                       bc: Dict[str, Dict[str, Tuple[str, Profile]]] | None = None,
-                       u_t_init: Array | None = None,
-                       plot_freq = 0, dump_freq = 0, run_label = '', showWall=True,
-                       ):
-    """SIMPLE loop with u_theta transport. Returns fields and history."""
-    if bc is None: bc = {}
-    grid = build_grid(Nr, Nz, R, Zmin, Zmax)
-    dr = grid.dr.mean(); dz = grid.dz.mean()
-    nu = mu / rho if mu>0 else 0.0
-    masks = build_slanted_wall_masks(grid, R, z_min=0.0, z_max=4.0)
+# def NEW_simple_solve_swirl(Nr=40, Nz=40, R=0.1, H=5.0, Zmin=0.0, Zmax=0.3,
+#                        rho=1000.0, mu=0.0, g=9.81, eta0=None,
+#                        dt=0.01, max_iter=500, alpha_p=0.3,
+#                        tol_div=1e-8, verbose=True,
+#                        bc: Dict[str, Dict[str, Tuple[str, Profile]]] | None = None,
+#                        u_t_init: Array | None = None,
+#                        plot_freq = 0, dump_freq = 0, run_label = '', showWall=True,
+#                        ):
+#     """SIMPLE loop with u_theta transport. Returns fields and history."""
+#     if bc is None: bc = {}
+#     grid = build_grid(Nr, Nz, R, Zmin, Zmax)
+#     dr = grid.dr.mean(); dz = grid.dz.mean()
+#     nu = mu / rho if mu>0 else 0.0
+#     masks = build_slanted_wall_masks(grid, R, z_min=0.0, z_max=4.0)
 
-    # free-surface needs an initial guess
-    if eta0 is None:
-        eta = np.full(Nr, H) # guess flat and go for it
-    else:
-        eta = eta0.copy()
+#     # free-surface needs an initial guess
+#     if eta0 is None:
+#         eta = np.full(Nr, H) # guess flat and go for it
+#     else:
+#         eta = eta0.copy()
         
-    # Fields
-    p = np.zeros((Nr, Nz))
-    u_r = np.zeros((Nr+1, Nz))
-    u_z = np.zeros((Nr,   Nz+1))
-    u_t = np.zeros((Nr, Nz)) if u_t_init is None else u_t_init.copy()
+#     # Fields
+#     p = np.zeros((Nr, Nz))
+#     u_r = np.zeros((Nr+1, Nz))
+#     u_z = np.zeros((Nr,   Nz+1))
+#     u_t = np.zeros((Nr, Nz)) if u_t_init is None else u_t_init.copy()
 
-    # Apply initial u_t BCs
-    apply_ut_boundary_segmented(u_t, grid, bc)
+#     # Apply initial u_t BCs
+#     apply_ut_boundary_segmented(u_t, grid, bc)
 
-    # Poisson operator (constant ρ)
-    Ap = assemble_poisson_matrix(grid, rho)
+#     # Poisson operator (constant ρ)
+#     Ap = assemble_poisson_matrix(grid, rho)
 
-    history = []
-    for it in range(1, max_iter+1):
+#     history = []
+#     for it in range(1, max_iter+1):
 
-        # Predictor for meridional velocities
-        dpdr, dpdz = grad_p_on_faces(p, grid)
-        u_r_star = u_r - (dt/rho)*dpdr
-        u_z_star = u_z - (dt/rho)*dpdz - dt*g
+#         # Predictor for meridional velocities
+#         dpdr, dpdz = grad_p_on_faces(p, grid)
+#         u_r_star = u_r - (dt/rho)*dpdr
+#         u_z_star = u_z - (dt/rho)*dpdz - dt*g
 
-        # --- NEW: add centrifugal acceleration from swirl on radial faces ---
-        # face radii r_f = r_edges[1:-1] for interior faces
-        r_f = grid.r_edges                   # shape (Nr+1,)
-        # interpolate u_theta from centers to the two cells adjacent to each radial face
-        # then average to the face; result shape (Nr-1, Nz)
-        u_t_left  = u_t[:-1, :]                    # (Nr-1, Nz)
-        u_t_right = u_t[1:,  :]                    # (Nr-1, Nz)
-        u_t_face  = 0.5*(u_t_left + u_t_right)     # (Nr-1, Nz) centered on interior faces
-        # a_c = u_theta^2 / r at the face
-        a_c = np.zeros_like(u_r_star)
-        a_c[1:-1,:] = (u_t_face**2) / r_f[1:-1, None]     # broadcast r_f along z
-        # apply mask to hide centrifugal force in the walled off portion
-        a_c *= masks['face_open_r'].astype(float)
-        # apply to interior radial faces; boundaries remain whatever BCs enforce
-        u_r_star += dt * a_c
+#         # --- NEW: add centrifugal acceleration from swirl on radial faces ---
+#         # face radii r_f = r_edges[1:-1] for interior faces
+#         r_f = grid.r_edges                   # shape (Nr+1,)
+#         # interpolate u_theta from centers to the two cells adjacent to each radial face
+#         # then average to the face; result shape (Nr-1, Nz)
+#         u_t_left  = u_t[:-1, :]                    # (Nr-1, Nz)
+#         u_t_right = u_t[1:,  :]                    # (Nr-1, Nz)
+#         u_t_face  = 0.5*(u_t_left + u_t_right)     # (Nr-1, Nz) centered on interior faces
+#         # a_c = u_theta^2 / r at the face
+#         a_c = np.zeros_like(u_r_star)
+#         a_c[1:-1,:] = (u_t_face**2) / r_f[1:-1, None]     # broadcast r_f along z
+#         # apply mask to hide centrifugal force in the walled off portion
+#         a_c *= masks['face_open_r'].astype(float)
+#         # apply to interior radial faces; boundaries remain whatever BCs enforce
+#         u_r_star += dt * a_c
         
-        if nu > 0.0:
-            u_r_star += dt * nu * laplacian_faces(u_r, dr, dz, orient='r')
-            u_z_star += dt * nu * laplacian_faces(u_z, dr, dz, orient='z')
+#         if nu > 0.0:
+#             u_r_star += dt * nu * laplacian_faces(u_r, dr, dz, orient='r')
+#             u_z_star += dt * nu * laplacian_faces(u_z, dr, dz, orient='z')
 
-        # Apply boundary normal velocities
-        apply_boundary_normal_segmented(u_r_star, u_z_star, grid, bc)
+#         # Apply boundary normal velocities
+#         apply_boundary_normal_segmented(u_r_star, u_z_star, grid, bc)
 
-        # set up BC's from injector and drain
-        Q_in = integrate_wall_inflow_rR(bc, grid)
-        u_bottom = make_bottom_drain_profile_auto(bc, grid, Q_in)
-        if u_bottom is not None:
-            u_z_star[:, 0] = u_bottom     # impose predictor normal velocity at bottom
+#         # set up BC's from injector and drain
+#         Q_in = integrate_wall_inflow_rR(bc, grid)
+#         u_bottom = make_bottom_drain_profile_auto(bc, grid, Q_in)
+#         if u_bottom is not None:
+#             u_z_star[:, 0] = u_bottom     # impose predictor normal velocity at bottom
 
 
-        # NEW: enforce internal slanted wall (no penetration + u_theta no-slip)
-        apply_internal_wall_bc(u_r_star, u_z_star, u_t, grid, masks)
+#         # NEW: enforce internal slanted wall (no penetration + u_theta no-slip)
+#         apply_internal_wall_bc(u_r_star, u_z_star, u_t, grid, masks)
         
-        # build pressure-correction Poisson RHS with segmented Neumann terms
-        b = poisson_rhs_with_bc_segmented_masked(grid, u_r_star, u_z_star, dt, rho, bc,
-                                                 masks, u_bottom=u_bottom,
-                                                 rhs_builder_no_mask=poisson_rhs_with_bc_segmented)
+#         # build pressure-correction Poisson RHS with segmented Neumann terms
+#         b = poisson_rhs_with_bc_segmented_masked(grid, u_r_star, u_z_star, dt, rho, bc,
+#                                                  masks, u_bottom=u_bottom,
+#                                                  rhs_builder_no_mask=poisson_rhs_with_bc_segmented)
 
-        # get liquid-air interface by solving for eta(r)
-        A_p, b_p = apply_atmospheric_on_polyline_eta(Ap.copy(), b.copy(), grid, eta, patm=1e5, masks=masks)
-        # solve Poisson eqn for P'
-        p_prime = spsolve(A_p, b_p).reshape((Nr, Nz), order='F')
+#         # get liquid-air interface by solving for eta(r)
+#         A_p, b_p = apply_atmospheric_on_polyline_eta(Ap.copy(), b.copy(), grid, eta, patm=1e5, masks=masks)
+#         # solve Poisson eqn for P'
+#         p_prime = spsolve(A_p, b_p).reshape((Nr, Nz), order='F')
 
-        # # Solve Poisson
-        # Ap_anch, b_anch = anchor_pressure(Ap.copy(), b.copy(), k=0)
-        # p_prime = spsolve(Ap_anch, b_anch).reshape((Nr, Nz), order='F')
+#         # # Solve Poisson
+#         # Ap_anch, b_anch = anchor_pressure(Ap.copy(), b.copy(), k=0)
+#         # p_prime = spsolve(Ap_anch, b_anch).reshape((Nr, Nz), order='F')
 
-        # Update pressure and correct velocities with p_prime
-        oldP = p.copy()
-        p += alpha_p * p_prime
-        dpdr_p, dpdz_p = grad_p_on_faces(p_prime, grid)
-        u_r = u_r_star - (dt/rho) * dpdr_p
-        u_z = u_z_star - (dt/rho) * dpdz_p
+#         # Update pressure and correct velocities with p_prime
+#         oldP = p.copy()
+#         p += alpha_p * p_prime
+#         dpdr_p, dpdz_p = grad_p_on_faces(p_prime, grid)
+#         u_r = u_r_star - (dt/rho) * dpdr_p
+#         u_z = u_z_star - (dt/rho) * dpdz_p
 
-        # Re-enforce boundary normals
-        apply_boundary_normal_segmented(u_r, u_z, grid, bc)
+#         # Re-enforce boundary normals
+#         apply_boundary_normal_segmented(u_r, u_z, grid, bc)
 
-        # Update u_theta explicitly with current (u_r,u_z)
-        u_t = _update_utheta(u_t, u_r, u_z, grid, nu, dt, bc)
+#         # Update u_theta explicitly with current (u_r,u_z)
+#         u_t = _update_utheta(u_t, u_r, u_z, grid, nu, dt, bc)
 
-        # Diagnostics
-        div_u = divergence_from_face_fluxes_masked(u_r, u_z, grid, masks)
-        max_div = np.max(np.abs(div_u))
-        res_p = np.max(np.abs(p-oldP))
-        # Track u_t change (Linf)
-        hist_ut = np.max(np.abs(_update_utheta(u_t, u_r, u_z, grid, nu, 0.0, bc) - u_t))  # zero dt -> just BC reapply
-        history.append((it, max_div, res_p, hist_ut))
+#         # Diagnostics
+#         div_u = divergence_from_face_fluxes_masked(u_r, u_z, grid, masks)
+#         max_div = np.max(np.abs(div_u))
+#         res_p = np.max(np.abs(p-oldP))
+#         # Track u_t change (Linf)
+#         hist_ut = np.max(np.abs(_update_utheta(u_t, u_r, u_z, grid, nu, 0.0, bc) - u_t))  # zero dt -> just BC reapply
+#         history.append((it, max_div, res_p, hist_ut))
 
-        # update the surface
-        eta, eta_residual = kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.4)
+#         # update the surface
+#         eta, eta_residual = kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.4)
 
-        if verbose and (it % 1000 == 0 or it == 1):
-            # print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
-            print("eta_residual = ", eta_residual)
-            print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} eta_res={np.sum(eta_residual):.3e}")
+#         if verbose and (it % 1000 == 0 or it == 1):
+#             # print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e}")
+#             print("eta_residual = ", eta_residual)
+#             print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} eta_res={np.sum(eta_residual):.3e}")
 
-        if (it % plot_freq == 0 or it == 1):
-            # -------------------
-            # Plot: pressure colormap + u_theta contours
-            # -------------------
-            # adjust to keep mass conservation
-            # V_target = np.pi * (grid.R**2) * H          # your known fill volume
-            # c = choose_pressure_offset_for_volume(p, grid, V_target,
-            #                                       masks, patm=0.0)
-            # p += c # now the P=0 contour will contain our mass
-            plot_pressure_contours(p, grid,
-                                   title='injected fluid: pressure contours %6d iters' % (it),
-                                   unit='bar', scale=1e5, n_contours=10,
-                                   filename="%s_Pcontours_%06d.png"%(run_label,it), show=False,
-                                   eta=eta, showWall=showWall)
+#         if (it % plot_freq == 0 or it == 1):
+#             # -------------------
+#             # Plot: pressure colormap + u_theta contours
+#             # -------------------
+#             # adjust to keep mass conservation
+#             # V_target = np.pi * (grid.R**2) * H          # your known fill volume
+#             # c = choose_pressure_offset_for_volume(p, grid, V_target,
+#             #                                       masks, patm=0.0)
+#             # p += c # now the P=0 contour will contain our mass
+#             plot_pressure_contours(p, grid,
+#                                    title='injected fluid: pressure contours %6d iters' % (it),
+#                                    unit='bar', scale=1e5, n_contours=10,
+#                                    filename="%s_Pcontours_%06d.png"%(run_label,it), show=False,
+#                                    eta=eta, showWall=showWall)
             
-            plot_streamlines(u_r, u_z, grid, density=1.5,
-                             title='Streamlines (u_r, u_z) %6d iters' % (it),
-                             filename="%s_streamlines_%06d.png"%(run_label,it), show=False,
-                             eta=eta, showWall=showWall,)
+#             plot_streamlines(u_r, u_z, grid, density=1.5,
+#                              title='Streamlines (u_r, u_z) %6d iters' % (it),
+#                              filename="%s_streamlines_%06d.png"%(run_label,it), show=False,
+#                              eta=eta, showWall=showWall,)
             
-            plot_pressure_with_swirl(p, u_t, grid,
-                                     title='u_theta(r,z) %6d iters' % (it),
-                                     unit='m/s', scale=1.0, show_contours=False,
-                                     filename="%s_u_theta_%06d.png"%(run_label,it),
-                                     eta=eta, show=False, showWall=showWall)
+#             plot_pressure_with_swirl(p, u_t, grid,
+#                                      title='u_theta(r,z) %6d iters' % (it),
+#                                      unit='m/s', scale=1.0, show_contours=False,
+#                                      filename="%s_u_theta_%06d.png"%(run_label,it),
+#                                      eta=eta, show=False, showWall=showWall)
             
-        # if max_div < tol_div and res_p < 1e-8:
-        if max_div < tol_div and res_p < 1:
-            if verbose:
-                print(f"Converged (continuity & pressure) at iter {it}: max(div u)={max_div:.3e}")
-            break
+#         # if max_div < tol_div and res_p < 1e-8:
+#         if max_div < tol_div and res_p < 1:
+#             if verbose:
+#                 print(f"Converged (continuity & pressure) at iter {it}: max(div u)={max_div:.3e}")
+#             break
 
-    # print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e} eta_res={eta_residual:.3e}")
-    print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} eta_res={np.sum(eta_residual):.3e}")
+#     # print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} max|ur|={np.max(np.abs(u_r)):.3e} max|uz|={np.max(np.abs(u_z)):.3e} eta_res={eta_residual:.3e}")
+#     print(f"Iter {it:4d}: max(div u)={max_div:.3e} max|p'-oldP|={res_p:.3e} eta_res={np.sum(eta_residual):.3e}")
 
-    return {'p': p, 'u_r': u_r, 'u_z': u_z, 'u_t': u_t, 'grid': grid,
-            'history': history, 'eta': eta}
+#     return {'p': p, 'u_r': u_r, 'u_z': u_z, 'u_t': u_t, 'grid': grid,
+#             'history': history, 'eta': eta}
 
 import matplotlib.pyplot as plt
     
