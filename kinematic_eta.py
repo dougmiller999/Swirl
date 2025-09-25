@@ -61,7 +61,7 @@ def kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.4):
     wz = np.clip(wz, 0.0, 1.0)
 
     # 3) u_z at (r_i, eta_i): interpolate between axial faces jf and jf+1
-    print(" wz = ", wz)
+    # print(" wz = ", wz)
     uz_low  = u_z[np.arange(Nr), jf]       # (Nr,)
     uz_high = u_z[np.arange(Nr), jf+1]     # (Nr,)
     u_z_surf = (1.0 - wz) * uz_low + wz * uz_high
@@ -77,9 +77,9 @@ def kinematic_eta_update(eta, u_r, u_z, grid, dt, lam=0.4):
 
     # 5) kinematic residual and update
     residual = u_z_surf - u_r_surf * deta_dr
-    print(" u_z_surf = ", u_z_surf)
-    print(" u_r_surf = ", u_r_surf)
-    print(" u_r_surf*deta_dr = ", u_r_surf*deta_dr)
+    # print(" u_z_surf = ", u_z_surf)
+    # print(" u_r_surf = ", u_r_surf)
+    # print(" u_r_surf*deta_dr = ", u_r_surf*deta_dr)
     # eta_new = eta + lam * dt * residual
     eta_new = eta + lam * eta_dt * residual
 
